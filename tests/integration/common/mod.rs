@@ -117,11 +117,8 @@ impl TestEnvironment {
 
         // Get Slack credential ID from environment (created by test script)
         let slack_credential_id = std::env::var("SLACK_CREDENTIAL_ID").ok();
-        if slack_credential_id.is_some() {
-            println!(
-                "Using Slack credential ID: {}",
-                slack_credential_id.as_ref().unwrap()
-            );
+        if let Some(ref cred_id) = slack_credential_id {
+            println!("Using Slack credential ID: {}", cred_id);
         }
 
         let n8n_client = N8nTestClient::new(N8N_URL).with_api_key(api_key);

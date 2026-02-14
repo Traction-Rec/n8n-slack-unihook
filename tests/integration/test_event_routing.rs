@@ -32,11 +32,9 @@ fn load_workflow(name: &str) -> serde_json::Value {
     // Add webhookId to any Slack Trigger nodes
     if let Some(nodes) = workflow.get_mut("nodes").and_then(|n| n.as_array_mut()) {
         for node in nodes {
-            if let Some(node_type) = node.get("type").and_then(|t| t.as_str()) {
-                if node_type == "n8n-nodes-base.slackTrigger" {
-                    node["webhookId"] =
-                        serde_json::Value::String(format!("test-webhook-{}-{}", name, unique_id));
-                }
+            if node.get("type").and_then(|t| t.as_str()) == Some("n8n-nodes-base.slackTrigger") {
+                node["webhookId"] =
+                    serde_json::Value::String(format!("test-webhook-{}-{}", name, unique_id));
             }
         }
     }

@@ -11,7 +11,7 @@ pub enum SlackPayload {
 
     /// Slack sends this for actual events
     #[serde(rename = "event_callback")]
-    EventCallback(SlackEventCallback),
+    EventCallback(Box<SlackEventCallback>),
 }
 
 /// The event callback wrapper containing the actual event

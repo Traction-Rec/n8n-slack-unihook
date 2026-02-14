@@ -172,11 +172,13 @@ pub fn parse_slack_trigger(
 /// Extract channel IDs from node parameters
 fn extract_channels(params: &serde_json::Value) -> Vec<String> {
     // channelId as resource locator object: {"__rl": true, "value": "C123", "mode": "id"}
-    if let Some(channel_obj) = params.get("channelId") {
-        if let Some(value) = channel_obj.get("value").and_then(|v| v.as_str()) {
-            if !value.is_empty() {
-                return vec![value.to_string()];
-            }
+    if let Some(value) = params
+        .get("channelId")
+        .and_then(|obj| obj.get("value"))
+        .and_then(|v| v.as_str())
+    {
+        if !value.is_empty() {
+            return vec![value.to_string()];
         }
     }
 
