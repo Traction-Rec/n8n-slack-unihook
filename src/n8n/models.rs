@@ -176,10 +176,9 @@ fn extract_channels(params: &serde_json::Value) -> Vec<String> {
         .get("channelId")
         .and_then(|obj| obj.get("value"))
         .and_then(|v| v.as_str())
+        .filter(|v| !v.is_empty())
     {
-        if !value.is_empty() {
-            return vec![value.to_string()];
-        }
+        return vec![value.to_string()];
     }
 
     Vec::new()
