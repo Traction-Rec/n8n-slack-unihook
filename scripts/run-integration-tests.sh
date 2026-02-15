@@ -199,7 +199,7 @@ setup_n8n() {
     
     local credential_response=$(curl -s -b "$cookie_jar" -X POST http://localhost:6789/rest/credentials \
         -H "Content-Type: application/json" \
-        -d "{\"name\":\"Test Slack API\",\"type\":\"slackApi\",\"data\":{\"accessToken\":\"xoxb-test-token-for-integration-tests\",\"signingSecret\":\"$SLACK_SIGNING_SECRET\"}}")
+        -d "{\"name\":\"Test Slack API\",\"type\":\"slackApi\",\"data\":{\"accessToken\":\"xoxb-test-token-for-integration-tests\",\"signatureSecret\":\"$SLACK_SIGNING_SECRET\"}}")
     
     # Extract credential ID from response
     SLACK_CREDENTIAL_ID=$(echo "$credential_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
