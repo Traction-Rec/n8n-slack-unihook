@@ -26,7 +26,7 @@ Slack Unihook acts as a router between Slack and n8n:
 │  Slack Events   │────▶│  Slack Unihook   │────▶│  n8n Workflow A │
 │      API        │     │     Router       │────▶│  n8n Workflow B │
 └─────────────────┘     └──────────────────┘────▶│  n8n Workflow C │
-                              │                   └─────────────────┘
+                              │                  └─────────────────┘
                               ▼
                         ┌──────────────────┐
                         │   n8n API        │
