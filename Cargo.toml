@@ -1,6 +1,6 @@
 [package]
 name = "n8n-slack-unihook"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A Slack event router for n8n that enables multiple workflows to share a single Slack app webhook"
 license = "MIT"
@@ -36,6 +36,10 @@ thiserror = "2"
 tokio-test = "0.4"
 # Reqwest with cookies for test session management
 reqwest = { version = "0.13", features = ["json", "cookies"] }
+# For Slack signature computation in tests
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [[test]]
 name = "integration"

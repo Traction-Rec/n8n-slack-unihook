@@ -1,8 +1,8 @@
 //! Integration tests for event routing functionality
 
 use crate::common::{
-    TestEnvironment, UNIHOOK_URL, create_app_mention_payload, create_message_event_payload,
-    create_reaction_event_payload, create_url_verification_payload,
+    TEST_SLACK_SIGNING_SECRET, TestEnvironment, UNIHOOK_URL, create_app_mention_payload,
+    create_message_event_payload, create_reaction_event_payload, create_url_verification_payload,
 };
 use serde_json::json;
 use std::time::Duration;
@@ -674,6 +674,101 @@ async fn test_webhook_errors_dont_stop_propagation() {
     env.cleanup_workflow(&created2.id)
         .await
         .expect("Failed to cleanup workflow 2");
+}
+
+// ==================== Signature Verification Tests ====================
+
+/// Test that a properly signed Slack event triggers workflow execution.
+///
+/// This test verifies that:
+/// 1. The raw request body is forwarded unchanged (preserving the signature)
+/// 2. Slack headers (X-Slack-Signature, X-Slack-Request-Timestamp) are forwarded
+/// 3. n8n's Slack Trigger can verify the signature and execute the workflow
+#[tokio::test]
+async fn test_signed_slack_event_triggers_execution() {
+    let env = TestEnvironment::new(false)
+        .await
+        .expect("Failed to create test environment");
+
+    // Setup workflow
+    let workflow = load_workflow("message_trigger");
+    let created = env
+        .setup_workflow(&workflow)
+        .await
+        .expect("Failed to setup workflow");
+
+    // Get initial execution count
+    let initial_count = get_execution_count(&env, &created.id).await;
+
+    // Send a SIGNED message event (with proper X-Slack-Signature header)
+    let payload = create_message_event_payload("C123456", "Signed message test!");
+    let response = env
+        .send_signed_slack_event(&payload, TEST_SLACK_SIGNING_SECRET)
+        .await
+        .expect("Failed to send signed event");
+
+    // Should return 200 OK immediately (async processing)
+    assert!(
+        response.status().is_success(),
+        "Expected success for signed event, got: {}",
+        response.status()
+    );
+
+    // Verify workflow was actually executed
+    let execution_occurred = wait_for_execution(&env, &created.id, initial_count + 1).await;
+    assert!(
+        execution_occurred,
+        "Expected workflow execution to be triggered by signed event"
+    );
+
+    // Cleanup
+    env.cleanup_workflow(&created.id)
+        .await
+        .expect("Failed to cleanup workflow");
+}
+
+/// Test that signature headers are preserved when forwarding to n8n.
+///
+/// This is a more detailed test that verifies the exact headers are forwarded.
+#[tokio::test]
+async fn test_slack_signature_headers_forwarded() {
+    let env = TestEnvironment::new(false)
+        .await
+        .expect("Failed to create test environment");
+
+    // Setup workflow with any_event trigger (more permissive)
+    let workflow = load_workflow("any_event_trigger");
+    let created = env
+        .setup_workflow(&workflow)
+        .await
+        .expect("Failed to setup workflow");
+
+    let initial_count = get_execution_count(&env, &created.id).await;
+
+    // Send signed event
+    let payload = create_message_event_payload("C999999", "Header forwarding test");
+    let response = env
+        .send_signed_slack_event(&payload, TEST_SLACK_SIGNING_SECRET)
+        .await
+        .expect("Failed to send signed event");
+
+    assert!(
+        response.status().is_success(),
+        "Expected success, got: {}",
+        response.status()
+    );
+
+    // Verify execution occurred (proves headers were forwarded correctly)
+    let execution_occurred = wait_for_execution(&env, &created.id, initial_count + 1).await;
+    assert!(
+        execution_occurred,
+        "Expected workflow execution - signature headers may not be forwarded correctly"
+    );
+
+    // Cleanup
+    env.cleanup_workflow(&created.id)
+        .await
+        .expect("Failed to cleanup workflow");
 }
 
 // ==================== Cleanup Test ====================

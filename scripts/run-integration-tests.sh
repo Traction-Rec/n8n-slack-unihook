@@ -17,6 +17,10 @@ TEST_PASSWORD="TestPassword123"
 TEST_FIRST_NAME="Test"
 TEST_LAST_NAME="User"
 
+# Slack signing secret for signature verification tests
+# This must match TEST_SLACK_SIGNING_SECRET in tests/integration/common/mod.rs
+SLACK_SIGNING_SECRET="test-signing-secret-for-integration-tests"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -102,7 +106,7 @@ wait_for_n8n() {
     local attempt=0
     
     while [ $attempt -lt $max_attempts ]; do
-        if curl -s -f http://localhost:5678/healthz > /dev/null 2>&1; then
+        if curl -s -f http://localhost:6789/healthz > /dev/null 2>&1; then
             return 0
         fi
         attempt=$((attempt + 1))
@@ -133,7 +137,7 @@ setup_n8n() {
     log_step "Setting up n8n owner account..."
     
     # Always try to create the owner (will fail gracefully if exists)
-    local setup_response=$(curl -s -X POST http://localhost:5678/rest/owner/setup \
+    local setup_response=$(curl -s -X POST http://localhost:6789/rest/owner/setup \
         -H "Content-Type: application/json" \
         -d "{\"email\":\"$TEST_EMAIL\",\"password\":\"$TEST_PASSWORD\",\"firstName\":\"$TEST_FIRST_NAME\",\"lastName\":\"$TEST_LAST_NAME\"}")
     
@@ -155,7 +159,7 @@ setup_n8n() {
     # Create a cookie jar file
     local cookie_jar="/tmp/n8n_cookies_$$"
     
-    local login_response=$(curl -s -c "$cookie_jar" -X POST http://localhost:5678/rest/login \
+    local login_response=$(curl -s -c "$cookie_jar" -X POST http://localhost:6789/rest/login \
         -H "Content-Type: application/json" \
         -d "{\"emailOrLdapLoginId\":\"$TEST_EMAIL\",\"password\":\"$TEST_PASSWORD\"}")
     
@@ -173,7 +177,7 @@ setup_n8n() {
     # Calculate expiration timestamp (1 year from now in milliseconds)
     local expires_at=$(($(date +%s) * 1000 + 365 * 24 * 60 * 60 * 1000))
     
-    local api_key_response=$(curl -s -b "$cookie_jar" -X POST http://localhost:5678/rest/api-keys \
+    local api_key_response=$(curl -s -b "$cookie_jar" -X POST http://localhost:6789/rest/api-keys \
         -H "Content-Type: application/json" \
         -d "{\"label\":\"integration-test-key\",\"scopes\":[\"workflow:create\",\"workflow:delete\",\"workflow:read\",\"workflow:update\",\"workflow:list\",\"workflow:execute\"],\"expiresAt\":$expires_at}")
     
@@ -190,11 +194,12 @@ setup_n8n() {
     export N8N_API_KEY
     
     # Create Slack API credential for test workflows
-    log_step "Creating Slack API credential..."
+    # Includes signing secret for signature verification tests
+    log_step "Creating Slack API credential with signing secret..."
     
-    local credential_response=$(curl -s -b "$cookie_jar" -X POST http://localhost:5678/rest/credentials \
+    local credential_response=$(curl -s -b "$cookie_jar" -X POST http://localhost:6789/rest/credentials \
         -H "Content-Type: application/json" \
-        -d '{"name":"Test Slack API","type":"slackApi","data":{"accessToken":"xoxb-test-token-for-integration-tests"}}')
+        -d "{\"name\":\"Test Slack API\",\"type\":\"slackApi\",\"data\":{\"accessToken\":\"xoxb-test-token-for-integration-tests\",\"signatureSecret\":\"$SLACK_SIGNING_SECRET\"}}")
     
     # Extract credential ID from response
     SLACK_CREDENTIAL_ID=$(echo "$credential_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -216,9 +221,17 @@ setup_n8n() {
 
 # Start Docker environment if not skipped
 if [ "$SKIP_DOCKER" != "true" ]; then
-    # Clean up any existing test environment first
+    # Clean up any existing test environment first (aggressive cleanup)
     log_step "Cleaning up previous test environment..."
     docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" down -v 2>/dev/null || true
+    
+    # Also remove any orphaned volumes from previous test runs
+    # This ensures a clean state even if previous cleanup failed
+    docker volume rm "${PROJECT_NAME}_n8n_test_data" 2>/dev/null || true
+    docker volume rm "n8n-slack-unihook-test_n8n_test_data" 2>/dev/null || true
+    
+    # Remove containers explicitly in case they're orphaned
+    docker rm -f n8n-test n8n-slack-unihook-test 2>/dev/null || true
     
     log_step "Starting n8n..."
     docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d n8n
@@ -255,8 +268,8 @@ else
     log_info "Skipping Docker setup (--skip-docker)"
     
     # Verify services are running
-    if ! curl -s -f http://localhost:5678/healthz > /dev/null 2>&1; then
-        log_error "n8n is not running at http://localhost:5678"
+    if ! curl -s -f http://localhost:6789/healthz > /dev/null 2>&1; then
+        log_error "n8n is not running at http://localhost:6789"
         exit 1
     fi
     

@@ -83,11 +83,11 @@ pub async fn handle_slack_event(
 
             // Route the event asynchronously but respond immediately to Slack
             // Slack requires a response within 3 seconds
+            // IMPORTANT: We pass the raw body string (not re-serialized JSON) to preserve
+            // the exact bytes for Slack signature verification
             let router = state.router.clone();
             tokio::spawn(async move {
-                router
-                    .route_event(&callback, &raw_payload, forwarded_headers)
-                    .await;
+                router.route_event(&callback, body, forwarded_headers).await;
             });
 
             // Return 200 OK immediately to acknowledge receipt

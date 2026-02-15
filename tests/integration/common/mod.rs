@@ -10,12 +10,14 @@ pub use docker::{
 };
 pub use n8n_client::{N8nTestClient, WorkflowResponse};
 
+use hmac::{Hmac, Mac};
 use serde_json::Value;
+use sha2::Sha256;
 use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Test environment URLs
-pub const N8N_URL: &str = "http://localhost:5678";
+pub const N8N_URL: &str = "http://localhost:6789";
 pub const UNIHOOK_URL: &str = "http://localhost:3000";
 
 /// Test user credentials for n8n setup
@@ -24,8 +26,32 @@ pub const TEST_PASSWORD: &str = "TestPassword123"; // Must contain uppercase
 pub const TEST_FIRST_NAME: &str = "Test";
 pub const TEST_LAST_NAME: &str = "User";
 
+/// Test Slack signing secret for signature verification tests
+/// This must match the signing secret configured in the test Slack credential
+pub const TEST_SLACK_SIGNING_SECRET: &str = "test-signing-secret-for-integration-tests";
+
 /// Default timeout for waiting on services
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Compute a Slack request signature
+///
+/// The signature is computed as:
+/// sig_basestring = "v0:" + timestamp + ":" + request_body
+/// signature = "v0=" + HMAC-SHA256(signing_secret, sig_basestring).hex()
+pub fn compute_slack_signature(signing_secret: &str, timestamp: &str, body: &str) -> String {
+    let sig_basestring = format!("v0:{}:{}", timestamp, body);
+
+    let mut mac = HmacSha256::new_from_slice(signing_secret.as_bytes())
+        .expect("HMAC can take key of any size");
+    mac.update(sig_basestring.as_bytes());
+
+    let result = mac.finalize();
+    let signature_bytes = result.into_bytes();
+
+    format!("v0={}", hex::encode(signature_bytes))
+}
 
 /// Global API key storage (set once during test setup)
 static API_KEY: OnceLock<String> = OnceLock::new();
@@ -194,6 +220,43 @@ impl TestEnvironment {
         self.http_client
             .post(format!("{}/slack/events", UNIHOOK_URL))
             .json(payload)
+            .send()
+            .await
+            .map_err(|e| TestEnvError::RequestError(e.to_string()))
+    }
+
+    /// Send a signed Slack event to slack-unihook
+    ///
+    /// This sends the event with proper Slack signature headers, exactly as
+    /// Slack would send it. The raw body is sent as-is (not re-serialized)
+    /// to ensure the signature remains valid.
+    pub async fn send_signed_slack_event(
+        &self,
+        payload: &Value,
+        signing_secret: &str,
+    ) -> Result<reqwest::Response, TestEnvError> {
+        // Serialize the payload to a string (this is the "raw" body)
+        let body = serde_json::to_string(payload).map_err(|e| {
+            TestEnvError::RequestError(format!("Failed to serialize payload: {}", e))
+        })?;
+
+        // Get current timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string();
+
+        // Compute the signature
+        let signature = compute_slack_signature(signing_secret, &timestamp, &body);
+
+        // Send with Slack headers
+        self.http_client
+            .post(format!("{}/slack/events", UNIHOOK_URL))
+            .header("content-type", "application/json")
+            .header("x-slack-signature", signature)
+            .header("x-slack-request-timestamp", timestamp)
+            .body(body)
             .send()
             .await
             .map_err(|e| TestEnvError::RequestError(e.to_string()))

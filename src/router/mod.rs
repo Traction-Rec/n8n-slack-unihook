@@ -65,10 +65,14 @@ impl Router {
     }
 
     /// Route a Slack event to all matching triggers
+    ///
+    /// The `raw_body` parameter is the exact raw request body from Slack.
+    /// This must be forwarded as-is (not re-serialized) to preserve the
+    /// Slack signature for verification by n8n.
     pub async fn route_event(
         &self,
         callback: &SlackEventCallback,
-        raw_payload: &serde_json::Value,
+        raw_body: String,
         headers: HeaderMap,
     ) {
         let event = &callback.event;
@@ -109,8 +113,9 @@ impl Router {
             "Forwarding event to matching triggers"
         );
 
-        // Wrap headers in Arc for sharing across async tasks
+        // Wrap in Arc for sharing across async tasks
         let headers = Arc::new(headers);
+        let raw_body = Arc::new(raw_body);
 
         // Forward to all matching triggers concurrently
         // - Production webhooks: only for active workflows
@@ -120,14 +125,13 @@ impl Router {
         for trigger in &matching_triggers {
             let client = self.n8n_client.clone();
             let workflow_name = trigger.workflow_name.clone();
-            let payload = raw_payload.clone();
 
             // Production webhook - only for active workflows
             if trigger.workflow_active {
                 let prod_client = client.clone();
                 let prod_url = trigger.webhook_url.clone();
                 let prod_name = workflow_name.clone();
-                let prod_payload = payload.clone();
+                let prod_body = raw_body.clone();
                 let prod_headers = headers.clone();
                 forwards.push(tokio::spawn(async move {
                     Self::forward_to_webhook(
@@ -135,7 +139,7 @@ impl Router {
                         &prod_url,
                         &prod_name,
                         "production",
-                        &prod_payload,
+                        &prod_body,
                         &prod_headers,
                     )
                     .await
@@ -151,7 +155,7 @@ impl Router {
             let test_client = client.clone();
             let test_url = trigger.test_webhook_url.clone();
             let test_name = workflow_name.clone();
-            let test_payload = payload.clone();
+            let test_body = raw_body.clone();
             let test_headers = headers.clone();
             forwards.push(tokio::spawn(async move {
                 Self::forward_to_webhook(
@@ -159,7 +163,7 @@ impl Router {
                     &test_url,
                     &test_name,
                     "test",
-                    &test_payload,
+                    &test_body,
                     &test_headers,
                 )
                 .await
@@ -174,15 +178,18 @@ impl Router {
 
     /// Forward an event to a single webhook URL with proper error handling
     /// Errors are logged but do not propagate - other webhooks should still receive the event
+    ///
+    /// The `raw_body` is the exact raw request body from Slack, forwarded as-is
+    /// to preserve the signature for n8n's verification.
     async fn forward_to_webhook(
         client: &N8nClient,
         webhook_url: &str,
         workflow_name: &str,
         webhook_type: &str,
-        payload: &serde_json::Value,
+        raw_body: &str,
         headers: &HeaderMap,
     ) {
-        match client.forward_event(webhook_url, payload, headers).await {
+        match client.forward_event(webhook_url, raw_body, headers).await {
             Ok(()) => {
                 debug!(
                     workflow_name = %workflow_name,

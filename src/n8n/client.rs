@@ -119,22 +119,29 @@ impl N8nClient {
     }
 
     /// Forward a Slack event to a specific webhook URL
+    ///
+    /// The `raw_body` parameter is the exact raw request body from Slack.
+    /// This is forwarded as-is (not re-serialized) to preserve the exact bytes
+    /// for Slack signature verification by n8n.
     pub async fn forward_event(
         &self,
         webhook_url: &str,
-        payload: &serde_json::Value,
+        raw_body: &str,
         headers: &HeaderMap,
     ) -> Result<(), N8nClientError> {
         debug!(
             webhook_url = %webhook_url,
             forwarded_headers = headers.len(),
+            body_len = raw_body.len(),
             "Forwarding event to n8n webhook"
         );
 
-        // Build the request with forwarded headers
-        let mut request = self.client.post(webhook_url).json(payload);
+        // Build the request with the raw body (not re-serialized JSON)
+        // This preserves the exact bytes for signature verification
+        let mut request = self.client.post(webhook_url).body(raw_body.to_string());
 
         // Forward relevant headers from the original Slack request
+        // (includes Content-Type, X-Slack-Signature, X-Slack-Request-Timestamp, etc.)
         for (name, value) in headers.iter() {
             let header_name =
                 reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()).ok();

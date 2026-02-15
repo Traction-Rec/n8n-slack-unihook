@@ -9,12 +9,12 @@ services:
     image: n8nio/n8n:latest
     container_name: n8n-test
     ports:
-      - "5678:5678"
+      - "6789:6789"
     environment:
       # Webhook URL configuration
-      - WEBHOOK_URL=http://n8n:5678
+      - WEBHOOK_URL=http://n8n:6789
       - N8N_HOST=0.0.0.0
-      - N8N_PORT=5678
+      - N8N_PORT=6789
       - N8N_PROTOCOL=http
       # Disable telemetry in tests
       - N8N_DIAGNOSTICS_ENABLED=false
@@ -23,12 +23,15 @@ services:
       - DB_TYPE=sqlite
       # Skip the onboarding survey
       - N8N_SKIP_SETUP_WIZARD=true
+      # Disable SAML and LDAP SSO
+      - N8N_SAML_DISABLED=true
+      - N8N_LDAP_DISABLED=true
     volumes:
       - n8n_test_data:/home/node/.n8n
     networks:
       - test-network
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:5678/healthz"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6789/healthz"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -42,7 +45,7 @@ services:
     environment:
       # API key must be provided - set via environment before starting
       - N8N_API_KEY=${N8N_API_KEY:-}
-      - N8N_API_URL=http://n8n:5678
+      - N8N_API_URL=http://n8n:6789
       - LISTEN_ADDR=0.0.0.0:3000
       - REFRESH_INTERVAL_SECS=5
       - RUST_LOG=slack_unihook=debug
