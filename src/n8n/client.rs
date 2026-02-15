@@ -136,13 +136,12 @@ impl N8nClient {
 
         // Forward relevant headers from the original Slack request
         for (name, value) in headers.iter() {
-            if let Ok(header_name) =
-                reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes())
-            {
-                if let Ok(header_value) = reqwest::header::HeaderValue::from_bytes(value.as_bytes())
-                {
-                    request = request.header(header_name, header_value);
-                }
+            let header_name =
+                reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()).ok();
+            let header_value = reqwest::header::HeaderValue::from_bytes(value.as_bytes()).ok();
+
+            if let (Some(name), Some(value)) = (header_name, header_value) {
+                request = request.header(name, value);
             }
         }
 
