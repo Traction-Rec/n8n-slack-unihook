@@ -92,8 +92,7 @@ mod tests {
             HeaderValue::from_static("v0=abc123"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 1);
         assert_eq!(forwarded.get("x-slack-signature").unwrap(), "v0=abc123");
@@ -107,8 +106,7 @@ mod tests {
             HeaderValue::from_static("1234567890"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 1);
         assert_eq!(
@@ -125,8 +123,7 @@ mod tests {
             HeaderValue::from_static("application/json"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 1);
         assert_eq!(forwarded.get("content-type").unwrap(), "application/json");
@@ -156,8 +153,7 @@ mod tests {
             HeaderValue::from_static("application/json"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 5);
         assert!(forwarded.contains_key("x-slack-signature"));
@@ -187,8 +183,7 @@ mod tests {
             HeaderValue::from_static("Slackbot"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 0);
         assert!(!forwarded.contains_key("authorization"));
@@ -219,8 +214,7 @@ mod tests {
             HeaderValue::from_static("example.com"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 2);
         assert!(forwarded.contains_key("x-slack-signature"));
@@ -233,8 +227,7 @@ mod tests {
     fn test_empty_headers_returns_empty() {
         let headers = HeaderMap::new();
 
-        let forwarded =
-            extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 0);
     }
@@ -249,8 +242,7 @@ mod tests {
             HeaderValue::from_static("v0=abc123"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 1);
         // The key should be accessible regardless of case in the original

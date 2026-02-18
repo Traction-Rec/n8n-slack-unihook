@@ -70,12 +70,7 @@ impl JiraRouter {
     /// The `raw_body` parameter is the exact raw request body from Jira.
     /// This must be forwarded as-is (not re-serialized) to preserve the
     /// payload integrity and any authentication data.
-    pub async fn route_event(
-        &self,
-        webhook_event: &str,
-        raw_body: String,
-        headers: HeaderMap,
-    ) {
+    pub async fn route_event(&self, webhook_event: &str, raw_body: String, headers: HeaderMap) {
         debug!(
             webhook_event = %webhook_event,
             "Routing Jira event"

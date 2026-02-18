@@ -262,10 +262,8 @@ mod tests {
 
     #[test]
     fn test_parse_jira_trigger_webhook_url_trailing_slash() {
-        let node = create_jira_trigger_node(
-            Some("jh123"),
-            json!({"events": ["jira:issue_created"]}),
-        );
+        let node =
+            create_jira_trigger_node(Some("jh123"), json!({"events": ["jira:issue_created"]}));
         let workflow = create_workflow("wf1", "Workflow", vec![node.clone()]);
         let endpoints = default_endpoints();
 
@@ -284,10 +282,8 @@ mod tests {
 
     #[test]
     fn test_parse_jira_trigger_custom_endpoints() {
-        let node = create_jira_trigger_node(
-            Some("jh123"),
-            json!({"events": ["jira:issue_created"]}),
-        );
+        let node =
+            create_jira_trigger_node(Some("jh123"), json!({"events": ["jira:issue_created"]}));
         let workflow = create_workflow("wf1", "Workflow", vec![node.clone()]);
         let endpoints = WebhookEndpoints {
             production: "custom-webhook".to_string(),
@@ -309,10 +305,8 @@ mod tests {
 
     #[test]
     fn test_parse_jira_trigger_workflow_active_flag() {
-        let node = create_jira_trigger_node(
-            Some("jh123"),
-            json!({"events": ["jira:issue_created"]}),
-        );
+        let node =
+            create_jira_trigger_node(Some("jh123"), json!({"events": ["jira:issue_created"]}));
         let mut workflow = create_workflow("wf1", "Active Workflow", vec![node.clone()]);
         let endpoints = default_endpoints();
 
@@ -359,8 +353,7 @@ mod tests {
 
     #[test]
     fn test_jira_multiple_events_match() {
-        let trigger =
-            create_jira_trigger_config(vec!["jira:issue_created", "comment_created"]);
+        let trigger = create_jira_trigger_config(vec!["jira:issue_created", "comment_created"]);
 
         assert!(trigger.matches_event("jira:issue_created"));
         assert!(trigger.matches_event("comment_created"));

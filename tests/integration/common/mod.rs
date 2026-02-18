@@ -346,10 +346,7 @@ impl std::error::Error for TestEnvError {}
 // ==================== Shared Test Helpers ====================
 
 /// Node types to assign unique webhook IDs to during workflow loading
-const TRIGGER_NODE_TYPES: &[&str] = &[
-    "n8n-nodes-base.slackTrigger",
-    "n8n-nodes-base.jiraTrigger",
-];
+const TRIGGER_NODE_TYPES: &[&str] = &["n8n-nodes-base.slackTrigger", "n8n-nodes-base.jiraTrigger"];
 
 /// Load a workflow fixture from the workflows directory.
 ///

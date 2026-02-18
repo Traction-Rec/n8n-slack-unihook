@@ -115,10 +115,7 @@ impl N8nClient {
             }
         }
 
-        info!(
-            count = triggers.len(),
-            "Loaded Jira trigger configurations"
-        );
+        info!(count = triggers.len(), "Loaded Jira trigger configurations");
         Ok(triggers)
     }
 

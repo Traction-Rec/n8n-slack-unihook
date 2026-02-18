@@ -41,8 +41,7 @@ pub async fn handle_jira_event(
     );
 
     // Extract headers to forward to n8n
-    let forwarded_headers =
-        extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
+    let forwarded_headers = extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
     debug!(
         forwarded_header_count = forwarded_headers.len(),
         "Extracted headers to forward"
@@ -75,8 +74,7 @@ mod tests {
             HeaderValue::from_static("application/json"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 1);
         assert_eq!(forwarded.get("content-type").unwrap(), "application/json");
@@ -94,8 +92,7 @@ mod tests {
             HeaderValue::from_static("no-check"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 2);
         assert!(forwarded.contains_key("x-atlassian-webhook-identifier"));
@@ -122,8 +119,7 @@ mod tests {
             HeaderValue::from_static("Jira/1.0"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 0);
     }
@@ -150,8 +146,7 @@ mod tests {
             HeaderValue::from_static("example.com"),
         );
 
-        let forwarded =
-            extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 2);
         assert!(forwarded.contains_key("content-type"));
@@ -164,8 +159,7 @@ mod tests {
     fn test_empty_headers_returns_empty() {
         let headers = HeaderMap::new();
 
-        let forwarded =
-            extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
+        let forwarded = extract_forwarded_headers(&headers, JIRA_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 0);
     }
