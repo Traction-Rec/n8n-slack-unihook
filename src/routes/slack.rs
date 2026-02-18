@@ -6,31 +6,12 @@ use axum::{
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::router::Router;
 use crate::slack::{SlackPayload, UrlVerificationResponse};
 
-/// Application state shared across handlers
-pub struct AppState {
-    pub router: Arc<Router>,
-}
+use super::{AppState, extract_forwarded_headers};
 
 /// Headers to forward from Slack to n8n webhooks
-const FORWARDED_HEADER_PREFIXES: &[&str] = &["x-slack-", "content-type"];
-
-/// Extract headers that should be forwarded to n8n
-fn extract_forwarded_headers(headers: &HeaderMap) -> HeaderMap {
-    let mut forwarded = HeaderMap::new();
-    for (name, value) in headers.iter() {
-        let name_lower = name.as_str().to_lowercase();
-        if FORWARDED_HEADER_PREFIXES
-            .iter()
-            .any(|prefix| name_lower.starts_with(prefix))
-        {
-            forwarded.insert(name.clone(), value.clone());
-        }
-    }
-    forwarded
-}
+const SLACK_FORWARDED_HEADER_PREFIXES: &[&str] = &["x-slack-", "content-type"];
 
 /// Handle incoming Slack events
 ///
@@ -75,7 +56,8 @@ pub async fn handle_slack_event(
             );
 
             // Extract headers to forward to n8n
-            let forwarded_headers = extract_forwarded_headers(&headers);
+            let forwarded_headers =
+                extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
             debug!(
                 forwarded_header_count = forwarded_headers.len(),
                 "Extracted headers to forward"
@@ -85,7 +67,7 @@ pub async fn handle_slack_event(
             // Slack requires a response within 3 seconds
             // IMPORTANT: We pass the raw body string (not re-serialized JSON) to preserve
             // the exact bytes for Slack signature verification
-            let router = state.router.clone();
+            let router = state.slack_router.clone();
             tokio::spawn(async move {
                 router.route_event(&callback, body, forwarded_headers).await;
             });
@@ -94,15 +76,6 @@ pub async fn handle_slack_event(
             StatusCode::OK.into_response()
         }
     }
-}
-
-/// Health check endpoint
-pub async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let trigger_count = state.router.trigger_count();
-    Json(serde_json::json!({
-        "status": "healthy",
-        "triggers_loaded": trigger_count
-    }))
 }
 
 #[cfg(test)]
@@ -119,7 +92,7 @@ mod tests {
             HeaderValue::from_static("v0=abc123"),
         );
 
-        let forwarded = extract_forwarded_headers(&headers);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 1);
         assert_eq!(forwarded.get("x-slack-signature").unwrap(), "v0=abc123");
@@ -133,7 +106,7 @@ mod tests {
             HeaderValue::from_static("1234567890"),
         );
 
-        let forwarded = extract_forwarded_headers(&headers);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 1);
         assert_eq!(
@@ -150,7 +123,7 @@ mod tests {
             HeaderValue::from_static("application/json"),
         );
 
-        let forwarded = extract_forwarded_headers(&headers);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 1);
         assert_eq!(forwarded.get("content-type").unwrap(), "application/json");
@@ -180,7 +153,7 @@ mod tests {
             HeaderValue::from_static("application/json"),
         );
 
-        let forwarded = extract_forwarded_headers(&headers);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 5);
         assert!(forwarded.contains_key("x-slack-signature"));
@@ -210,7 +183,7 @@ mod tests {
             HeaderValue::from_static("Slackbot"),
         );
 
-        let forwarded = extract_forwarded_headers(&headers);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 0);
         assert!(!forwarded.contains_key("authorization"));
@@ -241,7 +214,7 @@ mod tests {
             HeaderValue::from_static("example.com"),
         );
 
-        let forwarded = extract_forwarded_headers(&headers);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 2);
         assert!(forwarded.contains_key("x-slack-signature"));
@@ -254,7 +227,7 @@ mod tests {
     fn test_empty_headers_returns_empty() {
         let headers = HeaderMap::new();
 
-        let forwarded = extract_forwarded_headers(&headers);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 0);
     }
@@ -269,7 +242,7 @@ mod tests {
             HeaderValue::from_static("v0=abc123"),
         );
 
-        let forwarded = extract_forwarded_headers(&headers);
+        let forwarded = extract_forwarded_headers(&headers, SLACK_FORWARDED_HEADER_PREFIXES);
 
         assert_eq!(forwarded.len(), 1);
         // The key should be accessible regardless of case in the original

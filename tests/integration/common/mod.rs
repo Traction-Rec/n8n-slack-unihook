@@ -3,16 +3,18 @@
 #![allow(dead_code)]
 
 pub mod docker;
+pub mod jira;
 pub mod n8n_client;
+pub mod slack;
 
 pub use docker::{
     DockerConfig, services_running, start_docker_env, stop_docker_env, wait_for_services,
 };
+pub use jira::*;
 pub use n8n_client::{N8nTestClient, WorkflowResponse};
+pub use slack::*;
 
-use hmac::{Hmac, Mac};
 use serde_json::Value;
-use sha2::Sha256;
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -33,24 +35,14 @@ pub const TEST_SLACK_SIGNING_SECRET: &str = "test-signing-secret-for-integration
 /// Default timeout for waiting on services
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
-type HmacSha256 = Hmac<Sha256>;
-
-/// Compute a Slack request signature
-///
-/// The signature is computed as:
-/// sig_basestring = "v0:" + timestamp + ":" + request_body
-/// signature = "v0=" + HMAC-SHA256(signing_secret, sig_basestring).hex()
-pub fn compute_slack_signature(signing_secret: &str, timestamp: &str, body: &str) -> String {
-    let sig_basestring = format!("v0:{}:{}", timestamp, body);
-
-    let mut mac = HmacSha256::new_from_slice(signing_secret.as_bytes())
-        .expect("HMAC can take key of any size");
-    mac.update(sig_basestring.as_bytes());
-
-    let result = mac.finalize();
-    let signature_bytes = result.into_bytes();
-
-    format!("v0={}", hex::encode(signature_bytes))
+/// Generate a simple unique identifier
+pub(crate) fn uuid_simple() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{:x}", nanos)
 }
 
 /// Global API key storage (set once during test setup)
@@ -104,6 +96,8 @@ pub async fn get_or_create_api_key() -> Result<String, TestEnvError> {
     Ok(api_key)
 }
 
+// ==================== Test Environment ====================
+
 /// Test environment that manages setup and teardown
 pub struct TestEnvironment {
     pub n8n_client: N8nTestClient,
@@ -112,6 +106,8 @@ pub struct TestEnvironment {
     manage_docker: bool,
     /// Slack credential ID for attaching to Slack Trigger nodes
     slack_credential_id: Option<String>,
+    /// Jira credential ID for attaching to Jira Trigger nodes
+    jira_credential_id: Option<String>,
 }
 
 impl TestEnvironment {
@@ -147,6 +143,12 @@ impl TestEnvironment {
             println!("Using Slack credential ID: {}", cred_id);
         }
 
+        // Get Jira credential ID from environment (created by test script)
+        let jira_credential_id = std::env::var("JIRA_CREDENTIAL_ID").ok();
+        if let Some(ref cred_id) = jira_credential_id {
+            println!("Using Jira credential ID: {}", cred_id);
+        }
+
         let n8n_client = N8nTestClient::new(N8N_URL).with_api_key(api_key);
         let http_client = reqwest::Client::new();
 
@@ -156,6 +158,7 @@ impl TestEnvironment {
             docker_config,
             manage_docker: should_manage,
             slack_credential_id,
+            jira_credential_id,
         })
     }
 
@@ -181,13 +184,23 @@ impl TestEnvironment {
                 })?;
         }
 
+        // If we have a Jira credential, attach it to the workflow's Jira Trigger nodes
+        if let Some(ref cred_id) = self.jira_credential_id {
+            self.n8n_client
+                .attach_jira_credential(&workflow.id, cred_id)
+                .await
+                .map_err(|e| {
+                    TestEnvError::N8nError(format!("Failed to attach Jira credential: {}", e))
+                })?;
+        }
+
         let activated = self
             .n8n_client
             .activate_workflow(&workflow.id)
             .await
             .map_err(|e| TestEnvError::N8nError(e.to_string()))?;
 
-        // Give slack-unihook time to refresh triggers
+        // Give unihook time to refresh triggers
         tokio::time::sleep(Duration::from_secs(6)).await;
 
         Ok(activated)
@@ -212,7 +225,27 @@ impl TestEnvironment {
         Ok(())
     }
 
-    /// Send a Slack event to slack-unihook (automatically signed)
+    /// Send a Jira event to the unihook middleware's /jira/events endpoint
+    ///
+    /// Forwards the payload as-is with content-type header.
+    pub async fn send_jira_event(
+        &self,
+        payload: &Value,
+    ) -> Result<reqwest::Response, TestEnvError> {
+        let body = serde_json::to_string(payload).map_err(|e| {
+            TestEnvError::RequestError(format!("Failed to serialize payload: {}", e))
+        })?;
+
+        self.http_client
+            .post(format!("{}/jira/events", UNIHOOK_URL))
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| TestEnvError::RequestError(e.to_string()))
+    }
+
+    /// Send a Slack event to unihook (automatically signed)
     ///
     /// This sends the event with proper Slack signature headers using the
     /// default test signing secret. All events are signed to match n8n's
@@ -226,7 +259,7 @@ impl TestEnvironment {
             .await
     }
 
-    /// Send a signed Slack event to slack-unihook
+    /// Send a signed Slack event to unihook
     ///
     /// This sends the event with proper Slack signature headers, exactly as
     /// Slack would send it. The raw body is sent as-is (not re-serialized)
@@ -263,7 +296,7 @@ impl TestEnvironment {
             .map_err(|e| TestEnvError::RequestError(e.to_string()))
     }
 
-    /// Get health status from slack-unihook
+    /// Get health status from unihook
     pub async fn get_health(&self) -> Result<Value, TestEnvError> {
         let response = self
             .http_client
@@ -287,6 +320,8 @@ impl Drop for TestEnvironment {
     }
 }
 
+// ==================== Error Types ====================
+
 #[derive(Debug)]
 pub enum TestEnvError {
     DockerError(String),
@@ -308,81 +343,91 @@ impl std::fmt::Display for TestEnvError {
 
 impl std::error::Error for TestEnvError {}
 
-/// Create a Slack URL verification challenge payload
-pub fn create_url_verification_payload(challenge: &str) -> Value {
-    serde_json::json!({
-        "type": "url_verification",
-        "challenge": challenge
-    })
+// ==================== Shared Test Helpers ====================
+
+/// Node types to assign unique webhook IDs to during workflow loading
+const TRIGGER_NODE_TYPES: &[&str] = &["n8n-nodes-base.slackTrigger", "n8n-nodes-base.jiraTrigger"];
+
+/// Load a workflow fixture from the workflows directory.
+///
+/// Automatically assigns unique webhookIds to all trigger nodes (Slack, Jira, etc.)
+/// to avoid conflicts between test runs.
+pub fn load_workflow(name: &str) -> serde_json::Value {
+    let path = format!(
+        "{}/tests/integration/workflows/{}.json",
+        env!("CARGO_MANIFEST_DIR"),
+        name
+    );
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("Failed to read workflow fixture: {}", path));
+    let mut workflow: serde_json::Value =
+        serde_json::from_str(&content).expect("Failed to parse workflow JSON");
+
+    // Generate a unique suffix for webhook IDs
+    let unique_id = uuid_simple();
+
+    // Add webhookId to all known trigger node types
+    if let Some(nodes) = workflow.get_mut("nodes").and_then(|n| n.as_array_mut()) {
+        for node in nodes {
+            let is_trigger = node
+                .get("type")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| TRIGGER_NODE_TYPES.contains(&t));
+
+            if is_trigger {
+                node["webhookId"] =
+                    serde_json::Value::String(format!("test-webhook-{}-{}", name, unique_id));
+            }
+        }
+    }
+
+    workflow
 }
 
-/// Create a Slack message event payload
-pub fn create_message_event_payload(channel: &str, text: &str) -> Value {
-    serde_json::json!({
-        "type": "event_callback",
-        "token": "test-token",
-        "team_id": "T12345",
-        "api_app_id": "A12345",
-        "event": {
-            "type": "message",
-            "channel": channel,
-            "user": "U12345",
-            "text": text,
-            "ts": "1234567890.123456"
-        },
-        "event_id": format!("Ev{}", uuid_simple()),
-        "event_time": 1234567890
-    })
+/// Get the execution count for a workflow
+pub async fn get_execution_count(env: &TestEnvironment, workflow_id: &str) -> i64 {
+    env.n8n_client
+        .get_executions(Some(workflow_id))
+        .await
+        .map(|r| r.data.len() as i64)
+        .unwrap_or(0)
 }
 
-/// Create a Slack reaction added event payload
-pub fn create_reaction_event_payload(channel: &str, reaction: &str) -> Value {
-    serde_json::json!({
-        "type": "event_callback",
-        "token": "test-token",
-        "team_id": "T12345",
-        "api_app_id": "A12345",
-        "event": {
-            "type": "reaction_added",
-            "user": "U12345",
-            "reaction": reaction,
-            "item": {
-                "type": "message",
-                "channel": channel,
-                "ts": "1234567890.123456"
-            },
-            "event_ts": "1234567890.123456"
-        },
-        "event_id": format!("Ev{}", uuid_simple()),
-        "event_time": 1234567890
-    })
+/// Wait for a workflow's execution count to reach the expected value.
+///
+/// Polls every 500ms for up to 5 seconds.
+pub async fn wait_for_execution(
+    env: &TestEnvironment,
+    workflow_id: &str,
+    expected_count: i64,
+) -> bool {
+    for _ in 0..10 {
+        let count = get_execution_count(env, workflow_id).await;
+        if count >= expected_count {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    false
 }
 
-/// Create an app mention event payload
-pub fn create_app_mention_payload(channel: &str, text: &str) -> Value {
-    serde_json::json!({
-        "type": "event_callback",
-        "token": "test-token",
-        "team_id": "T12345",
-        "api_app_id": "A12345",
-        "event": {
-            "type": "app_mention",
-            "channel": channel,
-            "user": "U12345",
-            "text": text,
-            "ts": "1234567890.123456"
-        },
-        "event_id": format!("Ev{}", uuid_simple()),
-        "event_time": 1234567890
-    })
-}
-
-/// Generate a simple unique identifier
-fn uuid_simple() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    format!("{:x}", nanos)
+/// Wait for the Jira trigger count reported by the /health endpoint to reach
+/// the expected value.
+///
+/// The trigger count is updated by the background refresh task, so after
+/// activating or deactivating a workflow we need to poll until the refresh
+/// picks up the change. Polls every second for up to 15 seconds (enough for
+/// at least two refresh cycles with the default 5-second interval).
+pub async fn wait_for_jira_trigger_count(env: &TestEnvironment, expected: i64) -> bool {
+    for _ in 0..15 {
+        if env
+            .get_health()
+            .await
+            .is_ok_and(|h| h["jira_triggers_loaded"].as_i64().unwrap_or(-1) == expected)
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    false
 }

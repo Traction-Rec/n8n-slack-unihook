@@ -37,6 +37,33 @@ services:
       retries: 10
       start_period: 10s
 
+  # Mock Jira API server — required for Jira Trigger workflow activation.
+  #
+  # n8n's Jira Trigger node unconditionally registers webhooks with the Jira
+  # REST API during workflow activation. There is no env var to disable this.
+  # This nginx mock responds to those API calls so workflows can be activated
+  # without a real Jira instance.
+  #
+  # A "dud" jiraSoftwareCloudApi credential is created during test setup
+  # (see scripts/run-integration-tests.sh) with its domain set to
+  # http://mock-jira:8080, routing all Jira API calls here.
+  #
+  # See tests/integration/mock-jira/nginx.conf for full details on the
+  # endpoints served and why each one is needed.
+  mock-jira:
+    image: nginx:alpine
+    container_name: mock-jira-test
+    volumes:
+      - ./tests/integration/mock-jira/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks:
+      - test-network
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
+      start_period: 2s
+
   n8n-slack-unihook:
     build: .
     container_name: n8n-slack-unihook-test

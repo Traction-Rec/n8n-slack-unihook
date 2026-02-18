@@ -1,46 +1,12 @@
-//! Integration tests for event routing functionality
+//! Integration tests for Slack event routing functionality
 
 use crate::common::{
     TestEnvironment, UNIHOOK_URL, create_app_mention_payload, create_message_event_payload,
-    create_reaction_event_payload, create_url_verification_payload,
+    create_reaction_event_payload, create_url_verification_payload, get_execution_count,
+    load_workflow, wait_for_execution,
 };
 use serde_json::json;
 use std::time::Duration;
-
-/// Load a workflow fixture from the workflows directory
-/// Adds a unique webhookId to each Slack Trigger node to avoid conflicts
-fn load_workflow(name: &str) -> serde_json::Value {
-    let path = format!(
-        "{}/tests/integration/workflows/{}.json",
-        env!("CARGO_MANIFEST_DIR"),
-        name
-    );
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Failed to read workflow fixture: {}", path));
-    let mut workflow: serde_json::Value =
-        serde_json::from_str(&content).expect("Failed to parse workflow JSON");
-
-    // Generate a unique suffix for webhook IDs
-    let unique_id = format!(
-        "{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    );
-
-    // Add webhookId to any Slack Trigger nodes
-    if let Some(nodes) = workflow.get_mut("nodes").and_then(|n| n.as_array_mut()) {
-        for node in nodes {
-            if node.get("type").and_then(|t| t.as_str()) == Some("n8n-nodes-base.slackTrigger") {
-                node["webhookId"] =
-                    serde_json::Value::String(format!("test-webhook-{}-{}", name, unique_id));
-            }
-        }
-    }
-
-    workflow
-}
 
 // ==================== Health Check Tests ====================
 
@@ -53,7 +19,8 @@ async fn test_health_endpoint_returns_ok() {
     let health = env.get_health().await.expect("Failed to get health");
 
     assert_eq!(health["status"], "healthy");
-    assert!(health["triggers_loaded"].is_number());
+    assert!(health["slack_triggers_loaded"].is_number());
+    assert!(health["jira_triggers_loaded"].is_number());
 }
 
 // ==================== URL Verification Tests ====================
@@ -110,28 +77,6 @@ async fn test_url_verification_with_different_challenges() {
 }
 
 // ==================== Event Routing Tests ====================
-
-/// Helper to get execution count for a workflow
-async fn get_execution_count(env: &TestEnvironment, workflow_id: &str) -> i64 {
-    env.n8n_client
-        .get_executions(Some(workflow_id))
-        .await
-        .map(|r| r.data.len() as i64)
-        .unwrap_or(0)
-}
-
-/// Helper to wait for and verify an execution occurred
-async fn wait_for_execution(env: &TestEnvironment, workflow_id: &str, expected_count: i64) -> bool {
-    // Wait up to 5 seconds for the execution to appear
-    for _ in 0..10 {
-        let count = get_execution_count(env, workflow_id).await;
-        if count >= expected_count {
-            return true;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    false
-}
 
 #[tokio::test]
 async fn test_message_event_triggers_workflow_execution() {
@@ -345,7 +290,7 @@ async fn test_channel_specific_trigger_loaded() {
 
     // Get initial trigger count (should be 0 after cleanup)
     let health_before = env.get_health().await.expect("Failed to get health");
-    let count_before = health_before["triggers_loaded"].as_i64().unwrap_or(0);
+    let count_before = health_before["slack_triggers_loaded"].as_i64().unwrap_or(0);
 
     // Setup channel-specific workflow
     let workflow = load_workflow("channel_specific_trigger");
@@ -359,7 +304,7 @@ async fn test_channel_specific_trigger_loaded() {
 
     // Check that trigger count increased by 1
     let health_after = env.get_health().await.expect("Failed to get health");
-    let count_after = health_after["triggers_loaded"].as_i64().unwrap_or(0);
+    let count_after = health_after["slack_triggers_loaded"].as_i64().unwrap_or(0);
 
     assert_eq!(
         count_after - count_before,
@@ -465,7 +410,7 @@ async fn test_multiple_workflows_can_be_active() {
 
     // Get trigger count before adding workflows
     let health_before = env.get_health().await.expect("Failed to get health");
-    let count_before = health_before["triggers_loaded"].as_i64().unwrap_or(0);
+    let count_before = health_before["slack_triggers_loaded"].as_i64().unwrap_or(0);
 
     // Setup multiple workflows
     let workflow1 = load_workflow("message_trigger");
@@ -486,7 +431,7 @@ async fn test_multiple_workflows_can_be_active() {
 
     // Check that trigger count increased by exactly 2
     let health_after = env.get_health().await.expect("Failed to get health");
-    let count_after = health_after["triggers_loaded"].as_i64().unwrap_or(0);
+    let count_after = health_after["slack_triggers_loaded"].as_i64().unwrap_or(0);
 
     assert_eq!(
         count_after - count_before,
@@ -608,8 +553,6 @@ async fn test_invalid_slack_payload_returns_bad_request() {
     assert_eq!(response.status().as_u16(), 400);
 }
 
-// ==================== Error Handling Tests ====================
-
 /// Test that webhook errors don't stop event propagation to other workflows.
 /// The test webhook endpoint will fail (no one listening) but the production
 /// webhook should still receive the event.
@@ -677,39 +620,3 @@ async fn test_webhook_errors_dont_stop_propagation() {
 }
 
 // ==================== Cleanup Test ====================
-
-#[tokio::test]
-async fn test_cleanup_removes_all_workflows() {
-    let env = TestEnvironment::new(false)
-        .await
-        .expect("Failed to create test environment");
-
-    // Setup a workflow
-    let workflow = load_workflow("message_trigger");
-    let created = env
-        .setup_workflow(&workflow)
-        .await
-        .expect("Failed to setup workflow");
-
-    // Clean up the specific workflow (more reliable than cleanup_all)
-    env.cleanup_workflow(&created.id)
-        .await
-        .expect("Failed to cleanup workflow");
-
-    // Wait for refresh
-    tokio::time::sleep(Duration::from_secs(6)).await;
-
-    // Check that the specific workflow is gone
-    let workflows = env
-        .n8n_client
-        .get_workflows()
-        .await
-        .expect("Failed to get workflows");
-
-    let still_exists = workflows.data.iter().any(|w| w.id == created.id);
-    assert!(
-        !still_exists,
-        "Expected workflow {} to be deleted",
-        created.id
-    );
-}

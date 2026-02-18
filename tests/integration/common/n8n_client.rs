@@ -264,6 +264,60 @@ impl N8nTestClient {
         Ok(())
     }
 
+    /// Attach Jira Software Cloud API credential to all Jira Trigger nodes in a workflow
+    /// This is required for n8n to properly register the webhook for the trigger
+    pub async fn attach_jira_credential(
+        &self,
+        workflow_id: &str,
+        credential_id: &str,
+    ) -> Result<(), N8nTestError> {
+        // First, get the current workflow
+        let workflow = self.get_workflow(workflow_id).await?;
+
+        // Find and update Jira Trigger nodes with the credential
+        let nodes_value = workflow
+            .get("nodes")
+            .ok_or_else(|| N8nTestError::ParseError("No nodes field in workflow".to_string()))?;
+
+        let mut nodes: Vec<serde_json::Value> = serde_json::from_value(nodes_value.clone())
+            .map_err(|e| N8nTestError::ParseError(format!("Failed to parse nodes: {}", e)))?;
+
+        let mut updated = false;
+
+        for node in &mut nodes {
+            if node.get("type").and_then(|t| t.as_str()) == Some("n8n-nodes-base.jiraTrigger") {
+                // Add credentials to this node
+                let credentials = serde_json::json!({
+                    "jiraSoftwareCloudApi": {
+                        "id": credential_id,
+                        "name": "Test Jira Software Cloud API"
+                    }
+                });
+                node.as_object_mut()
+                    .unwrap()
+                    .insert("credentials".to_string(), credentials);
+                updated = true;
+            }
+        }
+
+        if !updated {
+            // No Jira Trigger nodes found, nothing to do
+            return Ok(());
+        }
+
+        // Build update payload with only the required fields for PUT
+        let update_payload = serde_json::json!({
+            "name": workflow.get("name").cloned().unwrap_or(serde_json::json!("Workflow")),
+            "nodes": nodes,
+            "connections": workflow.get("connections").cloned().unwrap_or(serde_json::json!({})),
+            "settings": workflow.get("settings").cloned().unwrap_or(serde_json::json!({}))
+        });
+
+        self.update_workflow(workflow_id, &update_payload).await?;
+
+        Ok(())
+    }
+
     /// Get a workflow by ID
     pub async fn get_workflow(&self, workflow_id: &str) -> Result<serde_json::Value, N8nTestError> {
         let url = format!("{}/api/v1/workflows/{}", self.base_url, workflow_id);

@@ -1,4 +1,5 @@
 mod config;
+mod jira;
 mod n8n;
 mod router;
 mod routes;
@@ -10,8 +11,9 @@ use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
-use crate::router::Router;
-use crate::routes::{AppState, handle_slack_event, health_check};
+use crate::n8n::N8nClient;
+use crate::router::{JiraRouter, SlackRouter};
+use crate::routes::{AppState, handle_jira_event, handle_slack_event, health_check};
 
 #[tokio::main]
 async fn main() {
@@ -48,23 +50,32 @@ async fn main() {
         n8n_api_url = %config.n8n_api_url,
         listen_addr = %config.listen_addr,
         refresh_interval_secs = config.refresh_interval_secs,
-        "Starting Slack Unihook router"
+        "Starting Unihook router"
     );
 
-    // Create the router (event routing engine)
-    let event_router = Arc::new(Router::new(config.clone()));
+    // Create shared n8n API client
+    let n8n_client = Arc::new(N8nClient::new(config.clone()));
 
-    // Start the background task that refreshes trigger configurations
-    event_router.clone().start_refresh_task();
+    // Create the Slack router (event routing engine)
+    let slack_router = Arc::new(SlackRouter::new(config.clone(), n8n_client.clone()));
+
+    // Create the Jira router (event routing engine)
+    let jira_router = Arc::new(JiraRouter::new(config.clone(), n8n_client.clone()));
+
+    // Start background tasks that refresh trigger configurations
+    slack_router.clone().start_refresh_task();
+    jira_router.clone().start_refresh_task();
 
     // Create application state
     let app_state = Arc::new(AppState {
-        router: event_router,
+        slack_router,
+        jira_router,
     });
 
     // Build the HTTP router
     let app = AxumRouter::new()
         .route("/slack/events", post(handle_slack_event))
+        .route("/jira/events", post(handle_jira_event))
         .route("/health", get(health_check))
         .with_state(app_state);
 
@@ -75,6 +86,7 @@ async fn main() {
 
     info!(address = %config.listen_addr, "Server listening");
     info!("Slack webhook URL: http://<your-host>/slack/events");
+    info!("Jira webhook URL: http://<your-host>/jira/events");
 
     axum::serve(listener, app)
         .await

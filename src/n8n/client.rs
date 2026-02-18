@@ -1,7 +1,7 @@
 use crate::config::Config;
-use crate::n8n::models::{
-    SlackTriggerConfig, WebhookEndpoints, WorkflowsResponse, parse_slack_trigger,
-};
+use crate::jira::triggers::{JiraTriggerConfig, parse_jira_trigger};
+use crate::n8n::models::{WebhookEndpoints, WorkflowsResponse};
+use crate::slack::triggers::{SlackTriggerConfig, parse_slack_trigger};
 use axum::http::HeaderMap;
 use reqwest::Client;
 use std::sync::Arc;
@@ -76,6 +76,49 @@ impl N8nClient {
         Ok(triggers)
     }
 
+    /// Fetch all workflows and extract Jira trigger configurations
+    pub async fn fetch_jira_triggers(&self) -> Result<Vec<JiraTriggerConfig>, N8nClientError> {
+        let mut triggers = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let response = self.fetch_workflows_page(cursor.as_deref()).await?;
+
+            for workflow in response.data {
+                // Look for Jira Trigger nodes in the workflow
+                // We include both active and inactive workflows:
+                // - Active workflows: forward to both production and test webhooks
+                // - Inactive workflows: forward only to test webhooks (for development)
+                for node in &workflow.nodes {
+                    if let Some(trigger) = parse_jira_trigger(
+                        &workflow,
+                        node,
+                        &self.config.n8n_api_url,
+                        &self.webhook_endpoints,
+                    ) {
+                        info!(
+                            workflow_id = %trigger.workflow_id,
+                            workflow_name = %trigger.workflow_name,
+                            workflow_active = trigger.workflow_active,
+                            events = ?trigger.events,
+                            "Found Jira trigger"
+                        );
+                        triggers.push(trigger);
+                    }
+                }
+            }
+
+            // Check if there are more pages
+            match response.next_cursor {
+                Some(next) if !next.is_empty() => cursor = Some(next),
+                _ => break,
+            }
+        }
+
+        info!(count = triggers.len(), "Loaded Jira trigger configurations");
+        Ok(triggers)
+    }
+
     /// Fetch a single page of workflows from the n8n API
     async fn fetch_workflows_page(
         &self,
@@ -118,11 +161,11 @@ impl N8nClient {
         Ok(workflows)
     }
 
-    /// Forward a Slack event to a specific webhook URL
+    /// Forward an event to a specific webhook URL
     ///
-    /// The `raw_body` parameter is the exact raw request body from Slack.
-    /// This is forwarded as-is (not re-serialized) to preserve the exact bytes
-    /// for Slack signature verification by n8n.
+    /// The `raw_body` parameter is the exact raw request body from the source
+    /// (Slack, Jira, etc.). This is forwarded as-is (not re-serialized) to
+    /// preserve the exact bytes for signature/authentication verification by n8n.
     pub async fn forward_event(
         &self,
         webhook_url: &str,
@@ -140,8 +183,8 @@ impl N8nClient {
         // This preserves the exact bytes for signature verification
         let mut request = self.client.post(webhook_url).body(raw_body.to_string());
 
-        // Forward relevant headers from the original Slack request
-        // (includes Content-Type, X-Slack-Signature, X-Slack-Request-Timestamp, etc.)
+        // Forward relevant headers from the original request
+        // (e.g. Content-Type, X-Slack-Signature, X-Atlassian-* headers, etc.)
         for (name, value) in headers.iter() {
             let header_name =
                 reqwest::header::HeaderName::from_bytes(name.as_str().as_bytes()).ok();
