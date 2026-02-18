@@ -420,10 +420,12 @@ pub async fn wait_for_execution(
 /// at least two refresh cycles with the default 5-second interval).
 pub async fn wait_for_jira_trigger_count(env: &TestEnvironment, expected: i64) -> bool {
     for _ in 0..15 {
-        if let Ok(health) = env.get_health().await {
-            if health["jira_triggers_loaded"].as_i64().unwrap_or(-1) == expected {
-                return true;
-            }
+        if env
+            .get_health()
+            .await
+            .is_ok_and(|h| h["jira_triggers_loaded"].as_i64().unwrap_or(-1) == expected)
+        {
+            return true;
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
