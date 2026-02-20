@@ -49,9 +49,6 @@ async fn main() {
             eprintln!(
                 "  GITHUB_WEBHOOK_SECRET    - Shared secret for GitHub inbound HMAC verification"
             );
-            eprintln!(
-                "  JIRA_WEBHOOK_SECRET      - Shared secret for Jira inbound HMAC verification"
-            );
             std::process::exit(1);
         }
     };

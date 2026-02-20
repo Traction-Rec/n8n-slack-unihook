@@ -1,12 +1,11 @@
 use axum::{
-    extract::State,
+    extract::{OriginalUri, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::crypto::verify_hmac_sha256;
 use crate::jira::JiraWebhookPayload;
 
 use super::{AppState, extract_forwarded_headers};
@@ -18,35 +17,19 @@ const JIRA_FORWARDED_HEADER_PREFIXES: &[&str] = &["x-atlassian-", "content-type"
 /// Handle incoming Jira webhook events
 ///
 /// This endpoint:
-/// 1. If `JIRA_WEBHOOK_SECRET` is configured, verifies the `X-Hub-Signature`
-///    header using HMAC-SHA256 (Atlassian signing standard; returns 401 if invalid)
-/// 2. Parses the `webhookEvent` field from the Jira payload to determine the event type
-/// 3. Routes the event to all matching n8n workflows with Jira triggers
-/// 4. Forwards the raw body and relevant headers to preserve webhook authentication
+/// 1. Parses the `webhookEvent` field from the Jira payload to determine the event type
+/// 2. Routes the event to all matching n8n workflows with Jira triggers
+/// 3. Forwards the raw body, relevant headers, and any query parameters to n8n
+///
+/// Query parameters on the inbound URL (e.g. `/jira/events?secret=abc`) are
+/// forwarded to the n8n webhook URL so that n8n's `authenticateWebhook` /
+/// `httpQueryAuth` credential validation works transparently.
 pub async fn handle_jira_event(
     State(state): State<Arc<AppState>>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
-    // Verify inbound signature if a shared secret is configured
-    if let Some(ref secret) = state.config.jira_webhook_secret {
-        let signature = headers.get("x-hub-signature").and_then(|v| v.to_str().ok());
-
-        match signature {
-            Some(sig) if verify_hmac_sha256(secret, body.as_bytes(), sig) => {
-                debug!("Jira webhook signature verified successfully");
-            }
-            Some(_) => {
-                warn!("Jira webhook signature verification failed");
-                return (StatusCode::UNAUTHORIZED, "Invalid signature").into_response();
-            }
-            None => {
-                warn!("Missing X-Hub-Signature header but JIRA_WEBHOOK_SECRET is set");
-                return (StatusCode::UNAUTHORIZED, "Missing signature").into_response();
-            }
-        }
-    }
-
     // Parse the raw JSON to extract the webhookEvent field
     let payload: JiraWebhookPayload = match serde_json::from_str(&body) {
         Ok(p) => p,
@@ -69,12 +52,21 @@ pub async fn handle_jira_event(
         "Extracted headers to forward"
     );
 
+    // Capture query string from inbound URL for forwarding to n8n.
+    // This enables n8n's `authenticateWebhook` / `httpQueryAuth` feature:
+    // users add the credential query param to the Jira webhook URL pointing at
+    // Unihook, and we pass it through to the n8n webhook URL.
+    let query_string = uri.query().map(|q| q.to_string());
+    if let Some(ref qs) = query_string {
+        debug!(query_string = %qs, "Captured query string for forwarding");
+    }
+
     // Route the event asynchronously but respond immediately
     let jira_router = state.jira_router.clone();
     let webhook_event = payload.webhook_event.clone();
     tokio::spawn(async move {
         jira_router
-            .route_event(&webhook_event, body, forwarded_headers)
+            .route_event(&webhook_event, body, forwarded_headers, query_string)
             .await;
     });
 

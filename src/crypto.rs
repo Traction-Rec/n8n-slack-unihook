@@ -4,8 +4,7 @@ use sha2::Sha256;
 /// Verify an HMAC-SHA256 signature against a raw body and shared secret.
 ///
 /// The `signature_header` is expected to be in `sha256=<hex_digest>` format,
-/// which is the standard used by both GitHub (`X-Hub-Signature-256`) and
-/// Atlassian products like Jira and Bitbucket (`X-Hub-Signature`).
+/// which is the standard used by GitHub (`X-Hub-Signature-256`).
 ///
 /// Uses constant-time comparison to prevent timing attacks.
 ///

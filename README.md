@@ -74,10 +74,9 @@ N8N_API_URL=http://n8n:5678
 REFRESH_INTERVAL_SECS=60
 RUST_LOG=n8n_slack_unihook=info
 
-# Inbound webhook signature verification (optional but recommended)
-# Set these to the shared secrets configured in GitHub/Jira webhook settings
+# Inbound webhook signature verification (optional but recommended for GitHub)
+# Set this to the shared secret configured in your GitHub webhook settings
 # GITHUB_WEBHOOK_SECRET=your-github-webhook-secret
-# JIRA_WEBHOOK_SECRET=your-jira-webhook-secret
 ```
 
 3. Start the service:
@@ -121,7 +120,6 @@ cargo run
 | `N8N_ENDPOINT_WEBHOOK` | No | `webhook` | n8n production webhook path segment |
 | `N8N_ENDPOINT_WEBHOOK_TEST` | No | `webhook-test` | n8n test webhook path segment |
 | `GITHUB_WEBHOOK_SECRET` | No | - | Shared secret for verifying inbound GitHub webhooks (HMAC-SHA256 via `X-Hub-Signature-256`) |
-| `JIRA_WEBHOOK_SECRET` | No | - | Shared secret for verifying inbound Jira webhooks (HMAC-SHA256 via `X-Hub-Signature`) |
 | `RUST_LOG` | No | `n8n_slack_unihook=info` | Log level |
 
 ## Setting Up Slack
@@ -198,8 +196,8 @@ When an event arrives:
 1. **Register a webhook** in your Jira instance:
    - Go to **Settings → System → WebHooks** (Jira Server/Data Center) or use the Jira REST API
    - Set the URL to: `https://your-domain.com/jira/events`
+   - If you use n8n's `authenticateWebhook` feature, append the same query parameter to this URL (see [Query Parameter Forwarding](#query-parameter-forwarding-jira-authenticatewebhook))
    - Select the events you want to forward (or select all)
-   - **(Recommended)** Set a shared secret — Unihook can verify inbound signatures when `JIRA_WEBHOOK_SECRET` is set (see [Inbound Signature Verification](#inbound-signature-verification))
 
 2. **Set up the Jira credential workaround** in n8n (see [below](#jira-credential-workaround))
 
@@ -433,9 +431,8 @@ Unihook supports optional HMAC-SHA256 verification of incoming webhook payloads.
 | Service | Env Var | Header Verified | Signing Standard |
 |---------|---------|----------------|-----------------|
 | GitHub | `GITHUB_WEBHOOK_SECRET` | `X-Hub-Signature-256` | [GitHub webhook security](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries) |
-| Jira | `JIRA_WEBHOOK_SECRET` | `X-Hub-Signature` | [Atlassian secure webhooks](https://support.atlassian.com/bitbucket-cloud/docs/manage-webhooks/#Secure-webhooks) |
 
-**How it works**: Both providers compute `HMAC-SHA256(body, secret)` and send it as `sha256=<hex_digest>` in their respective headers. Unihook recomputes the HMAC using the configured env var and compares using constant-time equality.
+**How it works**: GitHub computes `HMAC-SHA256(body, secret)` and sends it as `sha256=<hex_digest>` in the `X-Hub-Signature-256` header. Unihook recomputes the HMAC using the configured env var and compares using constant-time equality.
 
 **Opt-in**: If the env var is not set, verification is skipped entirely and the endpoint accepts any well-formed request (backward-compatible with existing deployments).
 
@@ -443,11 +440,18 @@ Unihook supports optional HMAC-SHA256 verification of incoming webhook payloads.
 
 See [ADR-002: Inbound Webhook Signature Verification](docs/adr/002-inbound-webhook-signature-verification.md) for the full technical rationale.
 
-### Known Limitation: Jira `authenticateWebhook`
+### Query Parameter Forwarding (Jira `authenticateWebhook`)
 
-n8n's Jira Trigger node has an optional `authenticateWebhook` parameter that validates incoming requests using an `httpQueryAuth` credential (query parameters appended to the webhook URL). Unihook does not currently support this feature because n8n's public API does not expose decrypted credential data.
+n8n's Jira Trigger node has an optional `authenticateWebhook` parameter that validates incoming requests using an `httpQueryAuth` credential — a query parameter appended to the webhook URL.
 
-If you have `authenticateWebhook: true` on Jira Trigger nodes, you should disable it. Unihook provides its own inbound verification via `JIRA_WEBHOOK_SECRET`, which is a stronger mechanism (HMAC-SHA256 over the full body vs. a static query parameter).
+Unihook supports this transparently by forwarding any query parameters from the inbound Jira request URL to the n8n webhook URL. To use it:
+
+1. Enable `authenticateWebhook` on your Jira Trigger node in n8n and configure the `httpQueryAuth` credential (e.g. name=`secret`, value=`abc123`).
+2. When registering your Jira webhook, append the same query parameter to the Unihook URL:
+   `https://your-domain.com/jira/events?secret=abc123`
+3. Jira sends events to the URL with the query parameter. Unihook captures it and appends it to the n8n webhook URL when forwarding, so n8n's credential validation passes.
+
+No additional environment variables are required.
 
 ## API Endpoints
 

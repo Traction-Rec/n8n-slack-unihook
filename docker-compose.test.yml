@@ -77,9 +77,8 @@ services:
       - LISTEN_ADDR=0.0.0.0:3000
       - REFRESH_INTERVAL_SECS=5
       - RUST_LOG=slack_unihook=debug
-      # Webhook secrets for inbound signature verification
+      # Webhook secret for inbound GitHub signature verification
       - GITHUB_WEBHOOK_SECRET=test-github-webhook-secret-for-integration-tests
-      - JIRA_WEBHOOK_SECRET=test-jira-webhook-secret-for-integration-tests
     networks:
       - test-network
     depends_on:

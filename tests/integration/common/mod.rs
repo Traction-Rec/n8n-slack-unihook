@@ -38,10 +38,6 @@ pub const TEST_SLACK_SIGNING_SECRET: &str = "test-signing-secret-for-integration
 /// This must match the GITHUB_WEBHOOK_SECRET env var set on the unihook container.
 pub const TEST_GITHUB_WEBHOOK_SECRET: &str = "test-github-webhook-secret-for-integration-tests";
 
-/// Test Jira webhook secret for inbound signature verification tests.
-/// This must match the JIRA_WEBHOOK_SECRET env var set on the unihook container.
-pub const TEST_JIRA_WEBHOOK_SECRET: &str = "test-jira-webhook-secret-for-integration-tests";
-
 /// Default timeout for waiting on services
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -328,47 +324,10 @@ impl TestEnvironment {
 
     /// Send a Jira event to the unihook middleware's /jira/events endpoint
     ///
-    /// Forwards the payload with content-type and an HMAC-SHA256 signature in
-    /// the `X-Hub-Signature` header (Atlassian standard), computed using
-    /// `TEST_JIRA_WEBHOOK_SECRET`.
+    /// Forwards the payload with content-type header. No signing is required —
+    /// Jira inbound authentication is handled via query parameter forwarding
+    /// (see `authenticateWebhook` / `httpQueryAuth` support).
     pub async fn send_jira_event(
-        &self,
-        payload: &Value,
-    ) -> Result<reqwest::Response, TestEnvError> {
-        self.send_signed_jira_event(payload, TEST_JIRA_WEBHOOK_SECRET)
-            .await
-    }
-
-    /// Send a Jira event with a specific signing secret.
-    ///
-    /// This allows tests to deliberately send events with an invalid secret
-    /// to verify that the middleware rejects them.
-    pub async fn send_signed_jira_event(
-        &self,
-        payload: &Value,
-        signing_secret: &str,
-    ) -> Result<reqwest::Response, TestEnvError> {
-        let body = serde_json::to_string(payload).map_err(|e| {
-            TestEnvError::RequestError(format!("Failed to serialize payload: {}", e))
-        })?;
-
-        let signature = compute_jira_signature(signing_secret, &body);
-
-        self.http_client
-            .post(format!("{}/jira/events", UNIHOOK_URL))
-            .header("content-type", "application/json")
-            .header("x-hub-signature", signature)
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| TestEnvError::RequestError(e.to_string()))
-    }
-
-    /// Send a Jira event without any signature header.
-    ///
-    /// Used to verify that the middleware rejects unsigned requests when
-    /// `JIRA_WEBHOOK_SECRET` is configured.
-    pub async fn send_unsigned_jira_event(
         &self,
         payload: &Value,
     ) -> Result<reqwest::Response, TestEnvError> {
@@ -580,17 +539,6 @@ pub async fn wait_for_github_trigger_count(env: &TestEnvironment, expected: i64)
 ///
 /// Returns the signature in `sha256=<hex>` format (matching the `X-Hub-Signature-256` header).
 pub fn compute_github_signature(secret: &str, body: &str) -> String {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key");
-    mac.update(body.as_bytes());
-    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
-}
-
-/// Compute an HMAC-SHA256 signature for a Jira webhook payload.
-///
-/// Returns the signature in `sha256=<hex>` format (Atlassian `X-Hub-Signature` standard).
-pub fn compute_jira_signature(secret: &str, body: &str) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key");

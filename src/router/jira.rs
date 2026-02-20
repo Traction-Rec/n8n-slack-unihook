@@ -70,7 +70,18 @@ impl JiraRouter {
     /// The `raw_body` parameter is the exact raw request body from Jira.
     /// This must be forwarded as-is (not re-serialized) to preserve the
     /// payload integrity and any authentication data.
-    pub async fn route_event(&self, webhook_event: &str, raw_body: String, headers: HeaderMap) {
+    ///
+    /// The optional `query_string` is the raw query string from the inbound
+    /// request (e.g. `"secret=abc123"`). When present it is appended to the
+    /// n8n webhook URL so that n8n's `authenticateWebhook` / `httpQueryAuth`
+    /// credential validation works transparently.
+    pub async fn route_event(
+        &self,
+        webhook_event: &str,
+        raw_body: String,
+        headers: HeaderMap,
+        query_string: Option<String>,
+    ) {
         debug!(
             webhook_event = %webhook_event,
             "Routing Jira event"
@@ -103,6 +114,7 @@ impl JiraRouter {
         // Wrap in Arc for sharing across async tasks
         let headers = Arc::new(headers);
         let raw_body = Arc::new(raw_body);
+        let query_string = Arc::new(query_string);
 
         // Forward to all matching triggers concurrently
         // - Production webhooks: only for active workflows
@@ -113,10 +125,13 @@ impl JiraRouter {
             let client = self.n8n_client.clone();
             let workflow_name = trigger.workflow_name.clone();
 
+            // Append query string to webhook URLs if present
+            let prod_url = append_query_string(&trigger.webhook_url, &query_string);
+            let test_url = append_query_string(&trigger.test_webhook_url, &query_string);
+
             // Production webhook - only for active workflows
             if trigger.workflow_active {
                 let prod_client = client.clone();
-                let prod_url = trigger.webhook_url.clone();
                 let prod_name = workflow_name.clone();
                 let prod_body = raw_body.clone();
                 let prod_headers = headers.clone();
@@ -140,7 +155,6 @@ impl JiraRouter {
 
             // Test webhook - always forward (for development and testing)
             let test_client = client.clone();
-            let test_url = trigger.test_webhook_url.clone();
             let test_name = workflow_name.clone();
             let test_body = raw_body.clone();
             let test_headers = headers.clone();
@@ -166,5 +180,57 @@ impl JiraRouter {
     /// Get the current number of loaded Jira triggers (for health checks)
     pub fn trigger_count(&self) -> usize {
         self.triggers.read().len()
+    }
+}
+
+/// Append an optional query string to a URL.
+///
+/// If the URL already contains a query string (from the trigger config),
+/// the new parameters are appended with `&`. Otherwise `?` is used.
+fn append_query_string(url: &str, query_string: &Option<String>) -> String {
+    match query_string {
+        Some(qs) if !qs.is_empty() => {
+            if url.contains('?') {
+                format!("{}&{}", url, qs)
+            } else {
+                format!("{}?{}", url, qs)
+            }
+        }
+        _ => url.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_append_query_string_none() {
+        let url = "http://n8n:5678/webhook/abc/webhook";
+        assert_eq!(append_query_string(url, &None), url);
+    }
+
+    #[test]
+    fn test_append_query_string_empty() {
+        let url = "http://n8n:5678/webhook/abc/webhook";
+        assert_eq!(append_query_string(url, &Some(String::new())), url);
+    }
+
+    #[test]
+    fn test_append_query_string_to_clean_url() {
+        let url = "http://n8n:5678/webhook/abc/webhook";
+        assert_eq!(
+            append_query_string(url, &Some("secret=abc123".to_string())),
+            "http://n8n:5678/webhook/abc/webhook?secret=abc123"
+        );
+    }
+
+    #[test]
+    fn test_append_query_string_to_url_with_existing_params() {
+        let url = "http://n8n:5678/webhook/abc/webhook?existing=true";
+        assert_eq!(
+            append_query_string(url, &Some("secret=abc123".to_string())),
+            "http://n8n:5678/webhook/abc/webhook?existing=true&secret=abc123"
+        );
     }
 }

@@ -15,89 +15,6 @@ use crate::common::{
 use serde_json::json;
 use std::time::Duration;
 
-// ==================== Inbound Signature Verification Tests ====================
-
-#[tokio::test]
-async fn test_jira_event_rejected_with_invalid_signature() {
-    let env = TestEnvironment::new(false)
-        .await
-        .expect("Failed to create test environment");
-
-    // Send a Jira event signed with the wrong secret
-    let payload = create_jira_issue_created_payload("PROJ", "PROJ-123");
-    let response = env
-        .send_signed_jira_event(&payload, "wrong-secret")
-        .await
-        .expect("Failed to send event");
-
-    assert_eq!(
-        response.status().as_u16(),
-        401,
-        "Expected 401 Unauthorized for invalid Jira signature"
-    );
-}
-
-#[tokio::test]
-async fn test_jira_event_rejected_without_signature() {
-    let env = TestEnvironment::new(false)
-        .await
-        .expect("Failed to create test environment");
-
-    // Send a Jira event without any signature header
-    let payload = create_jira_issue_created_payload("PROJ", "PROJ-123");
-    let response = env
-        .send_unsigned_jira_event(&payload)
-        .await
-        .expect("Failed to send event");
-
-    assert_eq!(
-        response.status().as_u16(),
-        401,
-        "Expected 401 Unauthorized for missing Jira signature"
-    );
-}
-
-#[tokio::test]
-async fn test_jira_event_accepted_with_valid_signature() {
-    let env = TestEnvironment::new(false)
-        .await
-        .expect("Failed to create test environment");
-
-    // Setup workflow with issue trigger
-    let workflow = load_workflow("jira_issue_trigger");
-    let created = env
-        .setup_workflow(&workflow)
-        .await
-        .expect("Failed to setup workflow");
-
-    let initial_count = get_execution_count(&env, &created.id).await;
-
-    // Send a correctly-signed Jira event (uses TEST_JIRA_WEBHOOK_SECRET)
-    let payload = create_jira_issue_created_payload("PROJ", "PROJ-456");
-    let response = env
-        .send_jira_event(&payload)
-        .await
-        .expect("Failed to send event");
-
-    assert!(
-        response.status().is_success(),
-        "Expected success for correctly-signed Jira event, got: {}",
-        response.status()
-    );
-
-    // Verify workflow was executed
-    let execution_occurred = wait_for_execution(&env, &created.id, initial_count + 1).await;
-    assert!(
-        execution_occurred,
-        "Expected workflow execution for correctly-signed Jira event"
-    );
-
-    // Cleanup
-    env.cleanup_workflow(&created.id)
-        .await
-        .expect("Failed to cleanup workflow");
-}
-
 // ==================== Jira Event Routing Tests ====================
 
 #[tokio::test]
@@ -327,22 +244,15 @@ async fn test_jira_event_routed_to_multiple_matching_workflows() {
 
 #[tokio::test]
 async fn test_jira_invalid_json_returns_bad_request() {
-    use crate::common::{TEST_JIRA_WEBHOOK_SECRET, compute_jira_signature};
-
     let env = TestEnvironment::new(false)
         .await
         .expect("Failed to create test environment");
 
-    // Sign the invalid body so it passes inbound signature verification
-    let body = "not valid json";
-    let signature = compute_jira_signature(TEST_JIRA_WEBHOOK_SECRET, body);
-
     let response = env
         .http_client
         .post(format!("{}/jira/events", UNIHOOK_URL))
-        .body(body)
+        .body("not valid json")
         .header("content-type", "application/json")
-        .header("x-hub-signature", signature)
         .send()
         .await
         .expect("Failed to send request");
