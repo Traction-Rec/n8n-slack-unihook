@@ -15,6 +15,16 @@ pub struct Workflow {
     pub name: String,
     pub active: bool,
     pub nodes: Vec<WorkflowNode>,
+
+    /// Per-node static data stored by n8n during webhook lifecycle.
+    ///
+    /// Keys are `"node:<NodeName>"` and values are node-specific objects.
+    /// For GitHub Trigger nodes, the value contains `webhookSecret` which
+    /// is the HMAC secret n8n generated when registering the webhook with
+    /// GitHub. We need this secret to re-sign forwarded payloads so that
+    /// n8n's signature verification passes.
+    #[serde(rename = "staticData", default)]
+    pub static_data: Option<serde_json::Value>,
 }
 
 /// A node within a workflow

@@ -1,13 +1,14 @@
 # Unihook
 
-A lightweight Rust service that enables multiple n8n workflows to share a single inbound webhook for Slack and Jira. It receives all events at one endpoint per service and intelligently routes them to matching n8n workflows based on their trigger configurations.
+A lightweight Rust service that enables multiple n8n workflows to share a single inbound webhook for Slack, Jira, and GitHub. It receives all events at one endpoint per service and intelligently routes them to matching n8n workflows based on their trigger configurations.
 
 ## The Problem
 
-n8n's built-in trigger nodes (Slack Trigger, Jira Trigger) create unique webhooks for each workflow. External services like Slack and Jira only support a single event subscription URL per app/instance, which forces organizations to:
+n8n's built-in trigger nodes (Slack Trigger, Jira Trigger, GitHub Trigger) create unique webhooks for each workflow. External services like Slack, Jira, and GitHub only support a single event subscription URL per app/instance, which forces organizations to:
 
 - **Slack**: Create separate Slack apps for each workflow, manage multiple OAuth credentials, and deal with complex app approval processes
 - **Jira**: Register separate webhooks in Jira for each workflow, leading to webhook sprawl and management overhead
+- **GitHub**: Register separate webhooks per repository per workflow, causing webhook sprawl across repositories
 
 This is administratively unworkable for organizations with multiple event-triggered workflows.
 
@@ -15,7 +16,7 @@ This is administratively unworkable for organizations with multiple event-trigge
 
 Unihook acts as a router between external services and n8n:
 
-1. **Single Webhook**: Register one URL per service (Slack, Jira)
+1. **Single Webhook**: Register one URL per service (Slack, Jira, GitHub)
 2. **Dynamic Discovery**: Automatically discovers n8n workflows with matching triggers via the n8n API
 3. **Smart Routing**: Forwards events only to workflows whose trigger configuration matches the event
 4. **Zero Execution Waste**: Events that don't match any trigger never reach n8n
@@ -25,10 +26,15 @@ Unihook acts as a router between external services and n8n:
 │  Slack Events   │────▶│                  │────▶│  n8n Workflow A │
 │      API        │     │                  │────▶│  n8n Workflow B │
 └─────────────────┘     │                  │     └─────────────────┘
-                        │     Unihook      │
-┌─────────────────┐     │     Router       │     ┌─────────────────┐
-│  Jira Webhooks  │────▶│                  │────▶│  n8n Workflow C │
+                        │                  │
+┌─────────────────┐     │     Unihook      │     ┌─────────────────┐
+│  Jira Webhooks  │────▶│     Router       │────▶│  n8n Workflow C │
 │                 │     │                  │────▶│  n8n Workflow D │
+└─────────────────┘     │                  │     └─────────────────┘
+                        │                  │
+┌─────────────────┐     │                  │     ┌─────────────────┐
+│ GitHub Webhooks │────▶│                  │────▶│  n8n Workflow E │
+│                 │     │                  │────▶│  n8n Workflow F │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
                               │
                               ▼
@@ -67,6 +73,11 @@ N8N_API_KEY=your-n8n-api-key
 N8N_API_URL=http://n8n:5678
 REFRESH_INTERVAL_SECS=60
 RUST_LOG=n8n_slack_unihook=info
+
+# Inbound webhook signature verification (optional but recommended)
+# Set these to the shared secrets configured in GitHub/Jira webhook settings
+# GITHUB_WEBHOOK_SECRET=your-github-webhook-secret
+# JIRA_WEBHOOK_SECRET=your-jira-webhook-secret
 ```
 
 3. Start the service:
@@ -109,6 +120,8 @@ cargo run
 | `REFRESH_INTERVAL_SECS` | No | `60` | How often to refresh trigger configs |
 | `N8N_ENDPOINT_WEBHOOK` | No | `webhook` | n8n production webhook path segment |
 | `N8N_ENDPOINT_WEBHOOK_TEST` | No | `webhook-test` | n8n test webhook path segment |
+| `GITHUB_WEBHOOK_SECRET` | No | - | Shared secret for verifying inbound GitHub webhooks (HMAC-SHA256 via `X-Hub-Signature-256`) |
+| `JIRA_WEBHOOK_SECRET` | No | - | Shared secret for verifying inbound Jira webhooks (HMAC-SHA256 via `X-Hub-Signature`) |
 | `RUST_LOG` | No | `n8n_slack_unihook=info` | Log level |
 
 ## Setting Up Slack
@@ -172,7 +185,7 @@ When an event arrives:
 > This creates two problems when using Unihook:
 >
 > 1. **Duplicate webhooks** — You register a webhook in Jira pointing at Unihook (`/jira/events`), but n8n also registers its own webhooks pointing directly at n8n, bypassing Unihook entirely.
-> 2. **Activation failures** — If n8n cannot reach the Jira API (e.g. network restrictions, no real Jira instance), workflows with Jira Trigger nodes cannot be activated at all.
+> 2. **Activation failures** — If n8n cannot reach the Jira API (e.g. network restrictions, user permissions), workflows with Jira Trigger nodes cannot be activated at all.
 >
 > **The workaround** is to configure the Jira credential in n8n with a domain that does _not_ point to your real Jira instance. Instead, point it at a lightweight service that returns the minimal API responses n8n expects. This satisfies n8n's webhook registration calls without creating real webhooks in Jira or causing activation failures. Unihook handles all actual event routing — the credential is only needed to keep n8n happy.
 >
@@ -186,6 +199,7 @@ When an event arrives:
    - Go to **Settings → System → WebHooks** (Jira Server/Data Center) or use the Jira REST API
    - Set the URL to: `https://your-domain.com/jira/events`
    - Select the events you want to forward (or select all)
+   - **(Recommended)** Set a shared secret — Unihook can verify inbound signatures when `JIRA_WEBHOOK_SECRET` is set (see [Inbound Signature Verification](#inbound-signature-verification))
 
 2. **Set up the Jira credential workaround** in n8n (see [below](#jira-credential-workaround))
 
@@ -210,7 +224,7 @@ Because n8n's Jira Trigger node unconditionally registers webhooks via the Jira 
 | Workflow activation | `POST` | `/rest/webhooks/1.0/webhook` | `201` with a JSON webhook object containing a `self` URL |
 | Workflow deactivation | `DELETE` | `/rest/webhooks/1.0/webhook/{id}` | `204` |
 
-**Example nginx config** (see [`tests/integration/mock-jira/nginx.conf`](tests/integration/mock-jira/nginx.conf) for a complete working example):
+**Example nginx config** (see [`tests/integration/mock-apis/nginx.conf`](tests/integration/mock-apis/nginx.conf) for a complete working example that covers both Jira and GitHub):
 
 ```nginx
 server {
@@ -282,12 +296,166 @@ When a Jira webhook event arrives at `/jira/events`:
 | Options | `option_voting_changed`, `option_watching_changed`, `option_unassigned_issues_changed`, `option_subtasks_changed`, `option_attachments_changed`, `option_issuelinks_changed`, `option_timetracking_changed` |
 | Wildcard | `*` (matches all events) |
 
+## Setting Up GitHub
+
+### Important: n8n's Automatic Webhook Registration and Payload Re-signing
+
+> **You need to understand this before setting up GitHub workflows.**
+>
+> Like Jira, n8n's GitHub Trigger node calls the GitHub REST API to register its own webhooks whenever a workflow is activated. This is hardcoded in the node's lifecycle hooks ([`GithubTrigger.node.ts`](https://github.com/n8n-io/n8n/blob/master/packages/nodes-base/nodes/Github/GithubTrigger.node.ts)). If these API calls fail, workflow activation fails entirely.
+>
+> Additionally, n8n's GitHub Trigger generates a random HMAC secret during webhook registration and verifies every incoming payload against it using the `X-Hub-Signature-256` header. **This verification cannot be disabled** — if the signature is missing or invalid, n8n returns `401 Unauthorized`.
+>
+> Since the user's GitHub webhook (pointing at Unihook) uses a different secret than the one n8n generated, the original signature from GitHub won't pass n8n's verification. Unihook solves this by **re-signing each forwarded payload** with n8n's per-workflow secret, which it reads from the workflow's `staticData` via the n8n API.
+>
+> See [ADR-001: GitHub Webhook Payload Re-signing](docs/adr/001-github-webhook-payload-re-signing.md) for the full technical rationale.
+>
+> **The workaround** for webhook registration is the same pattern as Jira: point the GitHub credential in n8n at a mock service instead of real GitHub.
+>
+> **Note:** The Slack Trigger node does _not_ have this problem — it does not call out to Slack during workflow activation, so no workaround is needed for Slack.
+
+### Steps
+
+1. **Create a webhook** on your GitHub repository (or organisation):
+   - Go to **Settings → Webhooks → Add webhook**
+   - Set the Payload URL to: `https://your-domain.com/github/events`
+   - Set Content type to `application/json`
+   - **(Recommended)** Set a secret — Unihook can verify inbound signatures when `GITHUB_WEBHOOK_SECRET` is set (see [Inbound Signature Verification](#inbound-signature-verification))
+   - Select the events you want to forward (or select "Send me everything")
+
+2. **Set up the GitHub credential workaround** in n8n (see [below](#github-credential-workaround))
+
+3. **Create n8n workflows** with GitHub Trigger nodes:
+   - Add a "GitHub Trigger" node to your workflow
+   - Configure the **Owner** and **Repository** to match the repository the webhook is on
+   - Configure the trigger's **Events** to match the events you want (e.g. `push`, `issues`, or `*` for all)
+   - Attach the workaround GitHub credential (not a real one)
+   - Activate the workflow
+
+4. **Unihook routes events** to matching workflows based on the `X-GitHub-Event` header and the repository owner/name in the payload.
+
+### GitHub Credential Workaround
+
+Because n8n's GitHub Trigger node registers webhooks via the GitHub REST API during workflow activation (see [above](#important-n8ns-automatic-webhook-registration-and-payload-re-signing)), you need a service that responds to those API calls. This is the same pattern as the [Jira credential workaround](#jira-credential-workaround).
+
+**What n8n calls during the GitHub Trigger lifecycle:**
+
+| When | Method | Endpoint | Expected Response |
+|------|--------|----------|-------------------|
+| Credential validation | `GET` | `/user` | `200` with a JSON user object |
+| Webhook check | `GET` | `/repos/{owner}/{repo}/hooks` | `200` with `[]` (empty array) |
+| Webhook creation | `POST` | `/repos/{owner}/{repo}/hooks` | `201` with a JSON webhook object containing `id` |
+| Webhook deletion | `DELETE` | `/repos/{owner}/{repo}/hooks/{id}` | `204` |
+
+**Example nginx config** (see [`tests/integration/mock-apis/nginx.conf`](tests/integration/mock-apis/nginx.conf) for a complete working example that covers both Jira and GitHub):
+
+```nginx
+server {
+    listen 8080;
+
+    # GitHub: Credential validation
+    location = /user {
+        default_type application/json;
+        return 200 '{"login":"noop","id":1,"type":"User"}';
+    }
+
+    # GitHub: Webhook listing and creation
+    location ~ ^/repos/[^/]+/[^/]+/hooks$ {
+        default_type application/json;
+        if ($request_method = GET)  { return 200 '[]'; }
+        if ($request_method = POST) { return 201 '{"id":1,"active":true,"events":["push"],"config":{"url":"http://noop","content_type":"json"}}'; }
+        return 200 '[]';
+    }
+
+    # GitHub: Webhook deletion
+    location ~ ^/repos/[^/]+/[^/]+/hooks/[0-9]+ {
+        return 204;
+    }
+
+    # Catch-all
+    location / {
+        default_type application/json;
+        return 200 '{}';
+    }
+}
+```
+
+**Then create the GitHub credential in n8n** with its server pointing at this mock service:
+
+| Field | Value | Notes |
+|-------|-------|-------|
+| Type | `GitHub API` | |
+| Server | `http://your-mock-host:8080` | Points at the mock, **not** real GitHub |
+| User | `noop` | Arbitrary — the mock accepts anything |
+| Access Token | `noop` | Arbitrary — the mock accepts anything |
+
+Attach this credential to your GitHub Trigger nodes. When n8n activates the workflow, its webhook registration calls hit the mock and succeed silently. Unihook handles all actual event delivery from GitHub, including re-signing payloads for n8n's signature verification.
+
+### GitHub Routing
+
+Unihook discovers workflows with GitHub Trigger nodes via the n8n API. For each trigger, it extracts:
+
+- **Event types** — The list of GitHub event types the trigger listens for (e.g. `push`, `issues`, `*`)
+- **Owner** — The repository owner (e.g. `n8n-io`)
+- **Repository** — The repository name (e.g. `n8n`)
+- **Webhook secret** — The HMAC secret from n8n's `staticData` (used for re-signing)
+
+When a GitHub webhook event arrives at `/github/events`:
+
+1. Extract the event type from the `X-GitHub-Event` header
+2. Extract the owner and repository from the payload
+3. Match against all discovered GitHub triggers where:
+   - Event type matches (exact match or wildcard `*`), AND
+   - Owner matches (case-insensitive), AND
+   - Repository matches (case-insensitive)
+4. For each matching trigger, re-sign the payload with that workflow's webhook secret and forward
+
+#### Supported GitHub Event Types
+
+| Category | Events |
+|----------|--------|
+| Code | `push`, `create`, `delete` |
+| Pull Requests | `pull_request`, `pull_request_review`, `pull_request_review_comment` |
+| Issues | `issues`, `issue_comment` |
+| CI/CD | `check_run`, `check_suite`, `deployment`, `deployment_status` |
+| Releases | `release` |
+| Repository | `repository`, `repository_import`, `repository_vulnerability_alert`, `public`, `fork`, `star`, `watch` |
+| Organisation | `organization`, `org_block`, `membership`, `member`, `team`, `team_add` |
+| GitHub Apps | `github_app_authorization`, `installation`, `installation_repositories` |
+| Other | `commit_comment`, `deploy_key`, `gollum`, `label`, `marketplace_purchase`, `milestone`, `page_build`, `project`, `project_card`, `project_column`, `security_advisory`, `status` |
+| Special | `ping` (handled automatically — acknowledged but not routed) |
+| Wildcard | `*` (matches all events) |
+
+## Inbound Signature Verification
+
+Unihook supports optional HMAC-SHA256 verification of incoming webhook payloads. When enabled, events that fail verification are rejected with `401 Unauthorized` before any routing occurs.
+
+| Service | Env Var | Header Verified | Signing Standard |
+|---------|---------|----------------|-----------------|
+| GitHub | `GITHUB_WEBHOOK_SECRET` | `X-Hub-Signature-256` | [GitHub webhook security](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries) |
+| Jira | `JIRA_WEBHOOK_SECRET` | `X-Hub-Signature` | [Atlassian secure webhooks](https://support.atlassian.com/bitbucket-cloud/docs/manage-webhooks/#Secure-webhooks) |
+
+**How it works**: Both providers compute `HMAC-SHA256(body, secret)` and send it as `sha256=<hex_digest>` in their respective headers. Unihook recomputes the HMAC using the configured env var and compares using constant-time equality.
+
+**Opt-in**: If the env var is not set, verification is skipped entirely and the endpoint accepts any well-formed request (backward-compatible with existing deployments).
+
+> **Note**: Inbound verification is independent of GitHub's outbound re-signing (see [ADR-001](docs/adr/001-github-webhook-payload-re-signing.md)). The inbound secret is the one you configure on the webhook pointing at Unihook; the outbound secret is the one n8n generates internally.
+
+See [ADR-002: Inbound Webhook Signature Verification](docs/adr/002-inbound-webhook-signature-verification.md) for the full technical rationale.
+
+### Known Limitation: Jira `authenticateWebhook`
+
+n8n's Jira Trigger node has an optional `authenticateWebhook` parameter that validates incoming requests using an `httpQueryAuth` credential (query parameters appended to the webhook URL). Unihook does not currently support this feature because n8n's public API does not expose decrypted credential data.
+
+If you have `authenticateWebhook: true` on Jira Trigger nodes, you should disable it. Unihook provides its own inbound verification via `JIRA_WEBHOOK_SECRET`, which is a stronger mechanism (HMAC-SHA256 over the full body vs. a static query parameter).
+
 ## API Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/slack/events` | POST | Receives Slack events (configure in Slack app) |
 | `/jira/events` | POST | Receives Jira webhook events (configure in Jira) |
+| `/github/events` | POST | Receives GitHub webhook events (configure in GitHub) |
 | `/health` | GET | Health check — reports loaded trigger counts |
 
 ## Reverse Proxy Setup (nginx example)
@@ -316,6 +484,15 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
+
+    location /github/events {
+        proxy_pass http://localhost:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
 }
 ```
 
@@ -337,16 +514,16 @@ server {
 ./scripts/run-integration-tests.sh --filter test_jira
 ```
 
-### Mock Jira API Server
+### Mock API Server
 
-The integration test environment includes the same [Jira credential workaround](#jira-credential-workaround) described above — a `mock-jira` nginx container runs on the Docker test network, and the test setup script creates a credential pointing at `http://mock-jira:8080`. See `tests/integration/mock-jira/nginx.conf`, `docker-compose.test.yml`, and `scripts/run-integration-tests.sh` for the implementation.
+The integration test environment includes the same credential workarounds described above for [Jira](#jira-credential-workaround) and [GitHub](#github-credential-workaround). A single `mock-apis` nginx container runs on the Docker test network, handling both Jira and GitHub API mocks on the same port (the URL paths are non-overlapping). The test setup script creates credentials for each service pointing at `http://mock-apis:8080`. See [`tests/integration/mock-apis/nginx.conf`](tests/integration/mock-apis/nginx.conf), [`docker-compose.test.yml`](docker-compose.test.yml), and [`scripts/run-integration-tests.sh`](scripts/run-integration-tests.sh) for the implementation.
 
 ## Troubleshooting
 
 ### Events not being forwarded
 
 1. Check the health endpoint: `curl http://localhost:3000/health`
-2. Verify triggers are loaded: The health response shows `slack_triggers_loaded` and `jira_triggers_loaded` counts
+2. Verify triggers are loaded: The health response shows `slack_triggers_loaded`, `jira_triggers_loaded`, and `github_triggers_loaded` counts
 3. Check logs: `docker logs n8n-slack-unihook`
 4. Ensure workflows are **active** in n8n (inactive workflows only receive test webhook events)
 
@@ -361,6 +538,20 @@ The integration test environment includes the same [Jira credential workaround](
 - Verify the `webhookEvent` field is present in the Jira payload
 - Check that the workflow's Jira Trigger node is configured for the correct event types
 - Use wildcard (`*`) events during debugging to match everything
+
+### GitHub events not matching
+
+- Verify the `X-GitHub-Event` header is present (GitHub always sends this)
+- Check that the workflow's GitHub Trigger node is configured for the correct **owner** and **repository** — these must match the repository sending events (case-insensitive)
+- Check that the event type matches (e.g. the trigger listens for `push` but GitHub is sending `issues`)
+- Use wildcard (`*`) events during debugging to match all event types for a given repo
+
+### GitHub events returning 401 from n8n
+
+- This means the payload re-signing failed or the webhook secret is stale
+- Ensure the workflow has been activated at least once (so `staticData` is populated with the webhook secret)
+- Trigger a refresh by restarting Unihook or waiting for the next refresh interval
+- Check logs for `"No webhook secret available"` warnings
 
 ### n8n API connection issues
 

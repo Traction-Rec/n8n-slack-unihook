@@ -37,24 +37,25 @@ services:
       retries: 10
       start_period: 10s
 
-  # Mock Jira API server — required for Jira Trigger workflow activation.
+  # Mock API server — required for trigger node workflow activation.
   #
-  # n8n's Jira Trigger node unconditionally registers webhooks with the Jira
-  # REST API during workflow activation. There is no env var to disable this.
-  # This nginx mock responds to those API calls so workflows can be activated
-  # without a real Jira instance.
+  # Several n8n trigger nodes (Jira Trigger, GitHub Trigger) unconditionally
+  # register webhooks with their respective external APIs during workflow
+  # activation. There is no env var to disable this. This single nginx mock
+  # responds to all those API calls so workflows can be activated without
+  # real external service accounts.
   #
-  # A "dud" jiraSoftwareCloudApi credential is created during test setup
-  # (see scripts/run-integration-tests.sh) with its domain set to
-  # http://mock-jira:8080, routing all Jira API calls here.
+  # "Dud" credentials are created during test setup (see
+  # scripts/run-integration-tests.sh) with their endpoints set to
+  # http://mock-apis:8080, routing all external API calls here.
   #
-  # See tests/integration/mock-jira/nginx.conf for full details on the
+  # See tests/integration/mock-apis/nginx.conf for full details on the
   # endpoints served and why each one is needed.
-  mock-jira:
+  mock-apis:
     image: nginx:alpine
-    container_name: mock-jira-test
+    container_name: mock-apis-test
     volumes:
-      - ./tests/integration/mock-jira/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./tests/integration/mock-apis/nginx.conf:/etc/nginx/nginx.conf:ro
     networks:
       - test-network
     healthcheck:
@@ -76,6 +77,9 @@ services:
       - LISTEN_ADDR=0.0.0.0:3000
       - REFRESH_INTERVAL_SECS=5
       - RUST_LOG=slack_unihook=debug
+      # Webhook secrets for inbound signature verification
+      - GITHUB_WEBHOOK_SECRET=test-github-webhook-secret-for-integration-tests
+      - JIRA_WEBHOOK_SECRET=test-jira-webhook-secret-for-integration-tests
     networks:
       - test-network
     depends_on:

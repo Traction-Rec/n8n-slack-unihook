@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::github::triggers::{GitHubTriggerConfig, parse_github_trigger};
 use crate::jira::triggers::{JiraTriggerConfig, parse_jira_trigger};
 use crate::n8n::models::{WebhookEndpoints, WorkflowsResponse};
 use crate::slack::triggers::{SlackTriggerConfig, parse_slack_trigger};
@@ -116,6 +117,54 @@ impl N8nClient {
         }
 
         info!(count = triggers.len(), "Loaded Jira trigger configurations");
+        Ok(triggers)
+    }
+
+    /// Fetch all workflows and extract GitHub trigger configurations
+    pub async fn fetch_github_triggers(&self) -> Result<Vec<GitHubTriggerConfig>, N8nClientError> {
+        let mut triggers = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let response = self.fetch_workflows_page(cursor.as_deref()).await?;
+
+            for workflow in response.data {
+                // Look for GitHub Trigger nodes in the workflow
+                // We include both active and inactive workflows:
+                // - Active workflows: forward to both production and test webhooks
+                // - Inactive workflows: forward only to test webhooks (for development)
+                for node in &workflow.nodes {
+                    if let Some(trigger) = parse_github_trigger(
+                        &workflow,
+                        node,
+                        &self.config.n8n_api_url,
+                        &self.webhook_endpoints,
+                    ) {
+                        info!(
+                            workflow_id = %trigger.workflow_id,
+                            workflow_name = %trigger.workflow_name,
+                            workflow_active = trigger.workflow_active,
+                            events = ?trigger.events,
+                            owner = %trigger.owner,
+                            repository = %trigger.repository,
+                            "Found GitHub trigger"
+                        );
+                        triggers.push(trigger);
+                    }
+                }
+            }
+
+            // Check if there are more pages
+            match response.next_cursor {
+                Some(next) if !next.is_empty() => cursor = Some(next),
+                _ => break,
+            }
+        }
+
+        info!(
+            count = triggers.len(),
+            "Loaded GitHub trigger configurations"
+        );
         Ok(triggers)
     }
 

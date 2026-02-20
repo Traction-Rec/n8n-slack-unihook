@@ -6,6 +6,7 @@ use axum::{
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use crate::crypto::verify_hmac_sha256;
 use crate::jira::JiraWebhookPayload;
 
 use super::{AppState, extract_forwarded_headers};
@@ -17,14 +18,35 @@ const JIRA_FORWARDED_HEADER_PREFIXES: &[&str] = &["x-atlassian-", "content-type"
 /// Handle incoming Jira webhook events
 ///
 /// This endpoint:
-/// 1. Parses the `webhookEvent` field from the Jira payload to determine the event type
-/// 2. Routes the event to all matching n8n workflows with Jira triggers
-/// 3. Forwards the raw body and relevant headers to preserve webhook authentication
+/// 1. If `JIRA_WEBHOOK_SECRET` is configured, verifies the `X-Hub-Signature`
+///    header using HMAC-SHA256 (Atlassian signing standard; returns 401 if invalid)
+/// 2. Parses the `webhookEvent` field from the Jira payload to determine the event type
+/// 3. Routes the event to all matching n8n workflows with Jira triggers
+/// 4. Forwards the raw body and relevant headers to preserve webhook authentication
 pub async fn handle_jira_event(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
+    // Verify inbound signature if a shared secret is configured
+    if let Some(ref secret) = state.config.jira_webhook_secret {
+        let signature = headers.get("x-hub-signature").and_then(|v| v.to_str().ok());
+
+        match signature {
+            Some(sig) if verify_hmac_sha256(secret, body.as_bytes(), sig) => {
+                debug!("Jira webhook signature verified successfully");
+            }
+            Some(_) => {
+                warn!("Jira webhook signature verification failed");
+                return (StatusCode::UNAUTHORIZED, "Invalid signature").into_response();
+            }
+            None => {
+                warn!("Missing X-Hub-Signature header but JIRA_WEBHOOK_SECRET is set");
+                return (StatusCode::UNAUTHORIZED, "Missing signature").into_response();
+            }
+        }
+    }
+
     // Parse the raw JSON to extract the webhookEvent field
     let payload: JiraWebhookPayload = match serde_json::from_str(&body) {
         Ok(p) => p,

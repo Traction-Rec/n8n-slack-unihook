@@ -105,6 +105,7 @@ mod tests {
             name: name.to_string(),
             active: true,
             nodes,
+            static_data: None,
         }
     }
 

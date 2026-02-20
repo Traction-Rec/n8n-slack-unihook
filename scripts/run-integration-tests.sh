@@ -213,22 +213,15 @@ setup_n8n() {
     log_info "Slack API credential created with ID: $SLACK_CREDENTIAL_ID"
     export SLACK_CREDENTIAL_ID
     
-    # Create a "dud" Jira Software Cloud API credential for Jira trigger test workflows.
-    #
-    # IMPORTANT: The domain MUST point to the mock-jira nginx container
-    # (http://mock-jira:8080). When n8n activates a workflow containing a
-    # Jira Trigger node, the node unconditionally calls the Jira REST API to
-    # register webhooks — there is no way to disable this in n8n. By pointing
-    # the credential's domain at our mock, these registration calls succeed
-    # without a real Jira instance.
-    #
-    # The email and apiToken values are arbitrary — the mock accepts anything.
-    # See tests/integration/mock-jira/nginx.conf for the full mock implementation.
-    log_step "Creating Jira Software Cloud API credential (pointing to mock-jira)..."
+    # Create a "dud" Jira Software Cloud API credential for Jira trigger test
+    # workflows. The domain points at the mock-apis nginx container so that
+    # n8n's webhook registration calls succeed without a real Jira instance.
+    # See tests/integration/mock-apis/nginx.conf for the mock implementation.
+    log_step "Creating Jira Software Cloud API credential (pointing to mock-apis)..."
     
     local jira_credential_response=$(curl -s -b "$cookie_jar" -X POST http://localhost:6789/rest/credentials \
         -H "Content-Type: application/json" \
-        -d '{"name":"Test Jira Software Cloud API","type":"jiraSoftwareCloudApi","data":{"email":"test@example.com","apiToken":"test-api-token","domain":"http://mock-jira:8080"}}')
+        -d '{"name":"Test Jira Software Cloud API","type":"jiraSoftwareCloudApi","data":{"email":"test@example.com","apiToken":"test-api-token","domain":"http://mock-apis:8080"}}')
     
     # Extract credential ID from response
     JIRA_CREDENTIAL_ID=$(echo "$jira_credential_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
@@ -241,6 +234,28 @@ setup_n8n() {
     
     log_info "Jira Software Cloud API credential created with ID: $JIRA_CREDENTIAL_ID"
     export JIRA_CREDENTIAL_ID
+    
+    # Create a "dud" GitHub API credential for GitHub trigger test workflows.
+    # The server points at the mock-apis nginx container so that n8n's webhook
+    # registration calls succeed without a real GitHub account.
+    # See tests/integration/mock-apis/nginx.conf for the mock implementation.
+    log_step "Creating GitHub API credential (pointing to mock-apis)..."
+    
+    local github_credential_response=$(curl -s -b "$cookie_jar" -X POST http://localhost:6789/rest/credentials \
+        -H "Content-Type: application/json" \
+        -d '{"name":"Test GitHub API","type":"githubApi","data":{"server":"http://mock-apis:8080","user":"test-user","accessToken":"test-token"}}')
+    
+    # Extract credential ID from response
+    GITHUB_CREDENTIAL_ID=$(echo "$github_credential_response" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    
+    if [ -z "$GITHUB_CREDENTIAL_ID" ]; then
+        log_error "Failed to create GitHub credential: $github_credential_response"
+        rm -f "$cookie_jar"
+        return 1
+    fi
+    
+    log_info "GitHub API credential created with ID: $GITHUB_CREDENTIAL_ID"
+    export GITHUB_CREDENTIAL_ID
     
     # Clean up cookie jar
     rm -f "$cookie_jar"
@@ -260,10 +275,12 @@ if [ "$SKIP_DOCKER" != "true" ]; then
     docker volume rm "n8n-slack-unihook-test_n8n_test_data" 2>/dev/null || true
     
     # Remove containers explicitly in case they're orphaned
-    docker rm -f n8n-test n8n-slack-unihook-test mock-jira-test 2>/dev/null || true
+    docker rm -f n8n-test n8n-slack-unihook-test mock-apis-test 2>/dev/null || true
+    # Also clean up legacy container names from before consolidation
+    docker rm -f mock-jira-test mock-github-test 2>/dev/null || true
     
-    log_step "Starting n8n and mock-jira..."
-    docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d n8n mock-jira
+    log_step "Starting n8n and mock-apis..."
+    docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d n8n mock-apis
 
     log_info "Waiting for n8n to be healthy..."
     if ! wait_for_n8n; then
@@ -283,7 +300,7 @@ if [ "$SKIP_DOCKER" != "true" ]; then
     fi
     
     log_step "Starting n8n-slack-unihook with API key..."
-    N8N_API_KEY="$N8N_API_KEY" docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d n8n-slack-unihook
+    N8N_API_KEY="$N8N_API_KEY" docker compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d --build n8n-slack-unihook
     
     log_info "Waiting for n8n-slack-unihook to be healthy..."
     if ! wait_for_unihook; then
@@ -318,11 +335,12 @@ echo ""
 export TEST_N8N_API_KEY="$N8N_API_KEY"
 export SLACK_CREDENTIAL_ID="$SLACK_CREDENTIAL_ID"
 export JIRA_CREDENTIAL_ID="$JIRA_CREDENTIAL_ID"
+export GITHUB_CREDENTIAL_ID="$GITHUB_CREDENTIAL_ID"
 
 if [ -n "$TEST_FILTER" ]; then
-    TEST_N8N_API_KEY="$N8N_API_KEY" SLACK_CREDENTIAL_ID="$SLACK_CREDENTIAL_ID" JIRA_CREDENTIAL_ID="$JIRA_CREDENTIAL_ID" cargo test --test integration "$TEST_FILTER" -- --test-threads=1 --nocapture
+    TEST_N8N_API_KEY="$N8N_API_KEY" SLACK_CREDENTIAL_ID="$SLACK_CREDENTIAL_ID" JIRA_CREDENTIAL_ID="$JIRA_CREDENTIAL_ID" GITHUB_CREDENTIAL_ID="$GITHUB_CREDENTIAL_ID" cargo test --test integration "$TEST_FILTER" -- --test-threads=1 --nocapture
 else
-    TEST_N8N_API_KEY="$N8N_API_KEY" SLACK_CREDENTIAL_ID="$SLACK_CREDENTIAL_ID" JIRA_CREDENTIAL_ID="$JIRA_CREDENTIAL_ID" cargo test --test integration -- --test-threads=1 --nocapture
+    TEST_N8N_API_KEY="$N8N_API_KEY" SLACK_CREDENTIAL_ID="$SLACK_CREDENTIAL_ID" JIRA_CREDENTIAL_ID="$JIRA_CREDENTIAL_ID" GITHUB_CREDENTIAL_ID="$GITHUB_CREDENTIAL_ID" cargo test --test integration -- --test-threads=1 --nocapture
 fi
 
 TEST_RESULT=$?
