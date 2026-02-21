@@ -1,10 +1,13 @@
+pub mod github;
 pub mod jira;
 pub mod slack;
 
+pub use github::handle_github_event;
 pub use jira::handle_jira_event;
 pub use slack::handle_slack_event;
 
-use crate::router::{JiraRouter, SlackRouter};
+use crate::config::Config;
+use crate::router::{GitHubRouter, JiraRouter, SlackRouter};
 use axum::{
     extract::State,
     http::HeaderMap,
@@ -16,6 +19,8 @@ use std::sync::Arc;
 pub struct AppState {
     pub slack_router: Arc<SlackRouter>,
     pub jira_router: Arc<JiraRouter>,
+    pub github_router: Arc<GitHubRouter>,
+    pub config: Arc<Config>,
 }
 
 /// Extract headers that should be forwarded to n8n, filtering by allowed prefixes.
@@ -41,10 +46,12 @@ pub fn extract_forwarded_headers(headers: &HeaderMap, allowed_prefixes: &[&str])
 pub async fn health_check(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let slack_trigger_count = state.slack_router.trigger_count();
     let jira_trigger_count = state.jira_router.trigger_count();
+    let github_trigger_count = state.github_router.trigger_count();
     Json(serde_json::json!({
         "status": "healthy",
         "slack_triggers_loaded": slack_trigger_count,
-        "jira_triggers_loaded": jira_trigger_count
+        "jira_triggers_loaded": jira_trigger_count,
+        "github_triggers_loaded": github_trigger_count
     }))
 }
 

@@ -1,5 +1,5 @@
 use axum::{
-    extract::State,
+    extract::{OriginalUri, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -19,9 +19,14 @@ const JIRA_FORWARDED_HEADER_PREFIXES: &[&str] = &["x-atlassian-", "content-type"
 /// This endpoint:
 /// 1. Parses the `webhookEvent` field from the Jira payload to determine the event type
 /// 2. Routes the event to all matching n8n workflows with Jira triggers
-/// 3. Forwards the raw body and relevant headers to preserve webhook authentication
+/// 3. Forwards the raw body, relevant headers, and any query parameters to n8n
+///
+/// Query parameters on the inbound URL (e.g. `/jira/events?secret=abc`) are
+/// forwarded to the n8n webhook URL so that n8n's `authenticateWebhook` /
+/// `httpQueryAuth` credential validation works transparently.
 pub async fn handle_jira_event(
     State(state): State<Arc<AppState>>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
     body: String,
 ) -> impl IntoResponse {
@@ -47,12 +52,21 @@ pub async fn handle_jira_event(
         "Extracted headers to forward"
     );
 
+    // Capture query string from inbound URL for forwarding to n8n.
+    // This enables n8n's `authenticateWebhook` / `httpQueryAuth` feature:
+    // users add the credential query param to the Jira webhook URL pointing at
+    // Unihook, and we pass it through to the n8n webhook URL.
+    let query_string = uri.query().map(|q| q.to_string());
+    if let Some(ref qs) = query_string {
+        debug!(query_string = %qs, "Captured query string for forwarding");
+    }
+
     // Route the event asynchronously but respond immediately
     let jira_router = state.jira_router.clone();
     let webhook_event = payload.webhook_event.clone();
     tokio::spawn(async move {
         jira_router
-            .route_event(&webhook_event, body, forwarded_headers)
+            .route_event(&webhook_event, body, forwarded_headers, query_string)
             .await;
     });
 

@@ -1,0 +1,49 @@
+{
+  "name": "Test GitHub Issues Trigger",
+  "nodes": [
+    {
+      "parameters": {
+        "owner": {
+          "__rl": true,
+          "value": "test-owner",
+          "mode": "name"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "test-repo",
+          "mode": "name"
+        },
+        "events": ["issues"]
+      },
+      "id": "github-trigger-issues",
+      "name": "GitHub Trigger",
+      "type": "n8n-nodes-base.githubTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {},
+      "id": "noop-node-github-issues",
+      "name": "No Operation",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [450, 300]
+    }
+  ],
+  "connections": {
+    "GitHub Trigger": {
+      "main": [
+        [
+          {
+            "node": "No Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

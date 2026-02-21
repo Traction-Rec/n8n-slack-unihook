@@ -1,0 +1,49 @@
+{
+  "name": "Test GitHub Wildcard Trigger",
+  "nodes": [
+    {
+      "parameters": {
+        "owner": {
+          "__rl": true,
+          "value": "test-owner",
+          "mode": "name"
+        },
+        "repository": {
+          "__rl": true,
+          "value": "test-repo",
+          "mode": "name"
+        },
+        "events": ["*"]
+      },
+      "id": "github-trigger-wildcard",
+      "name": "GitHub Trigger",
+      "type": "n8n-nodes-base.githubTrigger",
+      "typeVersion": 1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {},
+      "id": "noop-node-github-wildcard",
+      "name": "No Operation",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [450, 300]
+    }
+  ],
+  "connections": {
+    "GitHub Trigger": {
+      "main": [
+        [
+          {
+            "node": "No Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

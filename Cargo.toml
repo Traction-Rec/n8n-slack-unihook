@@ -31,6 +31,11 @@ futures = "0.3"
 # Error handling
 thiserror = "2"
 
+# Cryptography (HMAC-SHA256 for GitHub webhook signature re-signing)
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
 [dev-dependencies]
 # For integration tests
 tokio-test = "0.4"

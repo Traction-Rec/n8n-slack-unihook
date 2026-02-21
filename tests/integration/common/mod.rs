@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod docker;
+pub mod github;
 pub mod jira;
 pub mod n8n_client;
 pub mod slack;
@@ -10,6 +11,7 @@ pub mod slack;
 pub use docker::{
     DockerConfig, services_running, start_docker_env, stop_docker_env, wait_for_services,
 };
+pub use github::*;
 pub use jira::*;
 pub use n8n_client::{N8nTestClient, WorkflowResponse};
 pub use slack::*;
@@ -31,6 +33,10 @@ pub const TEST_LAST_NAME: &str = "User";
 /// Test Slack signing secret for signature verification tests
 /// This must match the signing secret configured in the test Slack credential
 pub const TEST_SLACK_SIGNING_SECRET: &str = "test-signing-secret-for-integration-tests";
+
+/// Test GitHub webhook secret for inbound signature verification tests.
+/// This must match the GITHUB_WEBHOOK_SECRET env var set on the unihook container.
+pub const TEST_GITHUB_WEBHOOK_SECRET: &str = "test-github-webhook-secret-for-integration-tests";
 
 /// Default timeout for waiting on services
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -108,6 +114,8 @@ pub struct TestEnvironment {
     slack_credential_id: Option<String>,
     /// Jira credential ID for attaching to Jira Trigger nodes
     jira_credential_id: Option<String>,
+    /// GitHub credential ID for attaching to GitHub Trigger nodes
+    github_credential_id: Option<String>,
 }
 
 impl TestEnvironment {
@@ -149,6 +157,12 @@ impl TestEnvironment {
             println!("Using Jira credential ID: {}", cred_id);
         }
 
+        // Get GitHub credential ID from environment (created by test script)
+        let github_credential_id = std::env::var("GITHUB_CREDENTIAL_ID").ok();
+        if let Some(ref cred_id) = github_credential_id {
+            println!("Using GitHub credential ID: {}", cred_id);
+        }
+
         let n8n_client = N8nTestClient::new(N8N_URL).with_api_key(api_key);
         let http_client = reqwest::Client::new();
 
@@ -159,6 +173,7 @@ impl TestEnvironment {
             manage_docker: should_manage,
             slack_credential_id,
             jira_credential_id,
+            github_credential_id,
         })
     }
 
@@ -194,6 +209,16 @@ impl TestEnvironment {
                 })?;
         }
 
+        // If we have a GitHub credential, attach it to the workflow's GitHub Trigger nodes
+        if let Some(ref cred_id) = self.github_credential_id {
+            self.n8n_client
+                .attach_github_credential(&workflow.id, cred_id)
+                .await
+                .map_err(|e| {
+                    TestEnvError::N8nError(format!("Failed to attach GitHub credential: {}", e))
+                })?;
+        }
+
         let activated = self
             .n8n_client
             .activate_workflow(&workflow.id)
@@ -225,9 +250,83 @@ impl TestEnvironment {
         Ok(())
     }
 
+    /// Send a GitHub event to the unihook middleware's /github/events endpoint
+    ///
+    /// Forwards the payload with the required X-GitHub-Event header, content-type,
+    /// and an HMAC-SHA256 signature in the X-Hub-Signature-256 header (computed
+    /// using `TEST_GITHUB_WEBHOOK_SECRET`).
+    pub async fn send_github_event(
+        &self,
+        event_type: &str,
+        payload: &Value,
+    ) -> Result<reqwest::Response, TestEnvError> {
+        self.send_signed_github_event(event_type, payload, TEST_GITHUB_WEBHOOK_SECRET)
+            .await
+    }
+
+    /// Send a GitHub event with a specific signing secret.
+    ///
+    /// This allows tests to deliberately send events with an invalid secret
+    /// to verify that the middleware rejects them.
+    pub async fn send_signed_github_event(
+        &self,
+        event_type: &str,
+        payload: &Value,
+        signing_secret: &str,
+    ) -> Result<reqwest::Response, TestEnvError> {
+        let body = serde_json::to_string(payload).map_err(|e| {
+            TestEnvError::RequestError(format!("Failed to serialize payload: {}", e))
+        })?;
+
+        let signature = compute_github_signature(signing_secret, &body);
+
+        self.http_client
+            .post(format!("{}/github/events", UNIHOOK_URL))
+            .header("content-type", "application/json")
+            .header("x-github-event", event_type)
+            .header(
+                "x-github-delivery",
+                format!("test-delivery-{}", uuid_simple()),
+            )
+            .header("x-hub-signature-256", signature)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| TestEnvError::RequestError(e.to_string()))
+    }
+
+    /// Send a GitHub event without any signature header.
+    ///
+    /// Used to verify that the middleware rejects unsigned requests when
+    /// `GITHUB_WEBHOOK_SECRET` is configured.
+    pub async fn send_unsigned_github_event(
+        &self,
+        event_type: &str,
+        payload: &Value,
+    ) -> Result<reqwest::Response, TestEnvError> {
+        let body = serde_json::to_string(payload).map_err(|e| {
+            TestEnvError::RequestError(format!("Failed to serialize payload: {}", e))
+        })?;
+
+        self.http_client
+            .post(format!("{}/github/events", UNIHOOK_URL))
+            .header("content-type", "application/json")
+            .header("x-github-event", event_type)
+            .header(
+                "x-github-delivery",
+                format!("test-delivery-{}", uuid_simple()),
+            )
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| TestEnvError::RequestError(e.to_string()))
+    }
+
     /// Send a Jira event to the unihook middleware's /jira/events endpoint
     ///
-    /// Forwards the payload as-is with content-type header.
+    /// Forwards the payload with content-type header. No signing is required —
+    /// Jira inbound authentication is handled via query parameter forwarding
+    /// (see `authenticateWebhook` / `httpQueryAuth` support).
     pub async fn send_jira_event(
         &self,
         payload: &Value,
@@ -346,7 +445,11 @@ impl std::error::Error for TestEnvError {}
 // ==================== Shared Test Helpers ====================
 
 /// Node types to assign unique webhook IDs to during workflow loading
-const TRIGGER_NODE_TYPES: &[&str] = &["n8n-nodes-base.slackTrigger", "n8n-nodes-base.jiraTrigger"];
+const TRIGGER_NODE_TYPES: &[&str] = &[
+    "n8n-nodes-base.slackTrigger",
+    "n8n-nodes-base.jiraTrigger",
+    "n8n-nodes-base.githubTrigger",
+];
 
 /// Load a workflow fixture from the workflows directory.
 ///
@@ -409,6 +512,38 @@ pub async fn wait_for_execution(
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     false
+}
+
+/// Wait for the GitHub trigger count reported by the /health endpoint to reach
+/// the expected value.
+///
+/// The trigger count is updated by the background refresh task, so after
+/// activating or deactivating a workflow we need to poll until the refresh
+/// picks up the change. Polls every second for up to 15 seconds (enough for
+/// at least two refresh cycles with the default 5-second interval).
+pub async fn wait_for_github_trigger_count(env: &TestEnvironment, expected: i64) -> bool {
+    for _ in 0..15 {
+        if env
+            .get_health()
+            .await
+            .is_ok_and(|h| h["github_triggers_loaded"].as_i64().unwrap_or(-1) == expected)
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    false
+}
+
+/// Compute an HMAC-SHA256 signature for a GitHub webhook payload.
+///
+/// Returns the signature in `sha256=<hex>` format (matching the `X-Hub-Signature-256` header).
+pub fn compute_github_signature(secret: &str, body: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key");
+    mac.update(body.as_bytes());
+    format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Wait for the Jira trigger count reported by the /health endpoint to reach

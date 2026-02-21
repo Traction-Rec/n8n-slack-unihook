@@ -1,4 +1,6 @@
 mod config;
+mod crypto;
+mod github;
 mod jira;
 mod n8n;
 mod router;
@@ -12,8 +14,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
 use crate::n8n::N8nClient;
-use crate::router::{JiraRouter, SlackRouter};
-use crate::routes::{AppState, handle_jira_event, handle_slack_event, health_check};
+use crate::router::{GitHubRouter, JiraRouter, SlackRouter};
+use crate::routes::{
+    AppState, handle_github_event, handle_jira_event, handle_slack_event, health_check,
+};
 
 #[tokio::main]
 async fn main() {
@@ -42,6 +46,9 @@ async fn main() {
             eprintln!("  REFRESH_INTERVAL_SECS    - Trigger refresh interval (default: 60)");
             eprintln!("  N8N_ENDPOINT_WEBHOOK     - Production webhook path (default: webhook)");
             eprintln!("  N8N_ENDPOINT_WEBHOOK_TEST - Test webhook path (default: webhook-test)");
+            eprintln!(
+                "  GITHUB_WEBHOOK_SECRET    - Shared secret for GitHub inbound HMAC verification"
+            );
             std::process::exit(1);
         }
     };
@@ -62,20 +69,27 @@ async fn main() {
     // Create the Jira router (event routing engine)
     let jira_router = Arc::new(JiraRouter::new(config.clone(), n8n_client.clone()));
 
+    // Create the GitHub router (event routing engine)
+    let github_router = Arc::new(GitHubRouter::new(config.clone(), n8n_client.clone()));
+
     // Start background tasks that refresh trigger configurations
     slack_router.clone().start_refresh_task();
     jira_router.clone().start_refresh_task();
+    github_router.clone().start_refresh_task();
 
     // Create application state
     let app_state = Arc::new(AppState {
         slack_router,
         jira_router,
+        github_router,
+        config: config.clone(),
     });
 
     // Build the HTTP router
     let app = AxumRouter::new()
         .route("/slack/events", post(handle_slack_event))
         .route("/jira/events", post(handle_jira_event))
+        .route("/github/events", post(handle_github_event))
         .route("/health", get(health_check))
         .with_state(app_state);
 
@@ -87,6 +101,7 @@ async fn main() {
     info!(address = %config.listen_addr, "Server listening");
     info!("Slack webhook URL: http://<your-host>/slack/events");
     info!("Jira webhook URL: http://<your-host>/jira/events");
+    info!("GitHub webhook URL: http://<your-host>/github/events");
 
     axum::serve(listener, app)
         .await

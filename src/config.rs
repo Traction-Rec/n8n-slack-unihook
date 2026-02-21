@@ -28,6 +28,13 @@ pub struct Config {
     /// Corresponds to n8n's N8N_ENDPOINT_WEBHOOK_TEST env var
     #[serde(default = "default_endpoint_webhook_test")]
     pub n8n_endpoint_webhook_test: String,
+
+    /// Optional shared secret for verifying inbound GitHub webhook signatures.
+    /// When set, the `X-Hub-Signature-256` header on incoming requests to
+    /// `/github/events` is verified using HMAC-SHA256 before routing.
+    /// When unset, inbound verification is skipped (existing behavior).
+    #[serde(default)]
+    pub github_webhook_secret: Option<String>,
 }
 
 fn default_n8n_api_url() -> String {
