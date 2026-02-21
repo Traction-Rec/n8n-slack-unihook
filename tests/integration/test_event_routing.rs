@@ -701,14 +701,28 @@ async fn test_cleanup_removes_all_workflows() {
     // Wait for refresh
     tokio::time::sleep(Duration::from_secs(6)).await;
 
-    // Check that the specific workflow is gone
-    let workflows = env
-        .n8n_client
-        .get_workflows()
-        .await
-        .expect("Failed to get workflows");
-
-    let still_exists = workflows.data.iter().any(|w| w.id == created.id);
+    // Check that the specific workflow is gone.
+    // Retry the API call a few times because n8n can be transiently unavailable
+    // (e.g. under load from parallel test teardowns).
+    let mut still_exists = true;
+    for attempt in 1..=5 {
+        match env.n8n_client.get_workflows().await {
+            Ok(workflows) => {
+                still_exists = workflows.data.iter().any(|w| w.id == created.id);
+                break;
+            }
+            Err(e) if attempt < 5 => {
+                eprintln!(
+                    "get_workflows attempt {}/5 failed ({}), retrying...",
+                    attempt, e
+                );
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => {
+                panic!("Failed to get workflows after 5 attempts: {}", e);
+            }
+        }
+    }
     assert!(
         !still_exists,
         "Expected workflow {} to be deleted",
