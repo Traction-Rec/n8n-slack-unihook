@@ -39,14 +39,14 @@ jobs:
       - name: Prepare binary
         run: |
           mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/n8n-slack-unihook dist/n8n-slack-unihook-linux-x86_64
-          chmod +x dist/n8n-slack-unihook-linux-x86_64
+          cp target/x86_64-unknown-linux-musl/release/n8n-unihook dist/n8n-unihook-linux-x86_64
+          chmod +x dist/n8n-unihook-linux-x86_64
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: binary-linux-x86_64
-          path: dist/n8n-slack-unihook-linux-x86_64
+          path: dist/n8n-unihook-linux-x86_64
 
   build-docker:
     name: Build and Push Docker Image
@@ -143,7 +143,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ inputs.version }}
 
           # Using binary
-          N8N_API_KEY=your-api-key ./n8n-slack-unihook-linux-x86_64
+          N8N_API_KEY=your-api-key ./n8n-unihook-linux-x86_64
           ```
 
           See the [README](https://github.com/${{ github.repository }}#readme) for full documentation.
@@ -156,6 +156,6 @@ jobs:
           name: v${{ inputs.version }}
           body_path: release-notes.md
           files: |
-            dist/n8n-slack-unihook-linux-x86_64
+            dist/n8n-unihook-linux-x86_64
           draft: false
           prerelease: false

@@ -1,5 +1,6 @@
 mod config;
 mod crypto;
+mod db;
 mod github;
 mod jira;
 mod n8n;
@@ -13,10 +14,12 @@ use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
+use crate::db::Database;
 use crate::n8n::N8nClient;
 use crate::router::{GitHubRouter, JiraRouter, SlackRouter};
 use crate::routes::{
     AppState, handle_github_event, handle_jira_event, handle_slack_event, health_check,
+    provider_github, provider_jira,
 };
 
 #[tokio::main]
@@ -49,6 +52,7 @@ async fn main() {
             eprintln!(
                 "  GITHUB_WEBHOOK_SECRET    - Shared secret for GitHub inbound HMAC verification"
             );
+            eprintln!("  DATABASE_PATH            - Path to SQLite database (default: unihook.db)");
             std::process::exit(1);
         }
     };
@@ -57,20 +61,46 @@ async fn main() {
         n8n_api_url = %config.n8n_api_url,
         listen_addr = %config.listen_addr,
         refresh_interval_secs = config.refresh_interval_secs,
+        database_path = %config.database_path,
         "Starting Unihook router"
     );
+
+    // Open the SQLite database
+    let db = match Database::open(&config.database_path) {
+        Ok(db) => Arc::new(db),
+        Err(e) => {
+            error!(error = %e, path = %config.database_path, "Failed to open database");
+            eprintln!(
+                "Error: Failed to open database at {}: {}",
+                config.database_path, e
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Create shared n8n API client
     let n8n_client = Arc::new(N8nClient::new(config.clone()));
 
     // Create the Slack router (event routing engine)
-    let slack_router = Arc::new(SlackRouter::new(config.clone(), n8n_client.clone()));
+    let slack_router = Arc::new(SlackRouter::new(
+        config.clone(),
+        n8n_client.clone(),
+        db.clone(),
+    ));
 
     // Create the Jira router (event routing engine)
-    let jira_router = Arc::new(JiraRouter::new(config.clone(), n8n_client.clone()));
+    let jira_router = Arc::new(JiraRouter::new(
+        config.clone(),
+        n8n_client.clone(),
+        db.clone(),
+    ));
 
     // Create the GitHub router (event routing engine)
-    let github_router = Arc::new(GitHubRouter::new(config.clone(), n8n_client.clone()));
+    let github_router = Arc::new(GitHubRouter::new(
+        config.clone(),
+        n8n_client.clone(),
+        db.clone(),
+    ));
 
     // Start background tasks that refresh trigger configurations
     slack_router.clone().start_refresh_task();
@@ -83,13 +113,37 @@ async fn main() {
         jira_router,
         github_router,
         config: config.clone(),
+        db: db.clone(),
     });
 
     // Build the HTTP router
     let app = AxumRouter::new()
+        // ── Inbound event routes (from external providers to n8n) ────────
         .route("/slack/events", post(handle_slack_event))
         .route("/jira/events", post(handle_jira_event))
         .route("/github/events", post(handle_github_event))
+        // ── Provider API mock routes (intercepting n8n → provider calls) ─
+        // GitHub API mock
+        .route(
+            "/repos/{owner}/{repo}/hooks",
+            get(provider_github::list_hooks).post(provider_github::create_hook),
+        )
+        .route(
+            "/repos/{owner}/{repo}/hooks/{hook_id}",
+            axum::routing::delete(provider_github::delete_hook),
+        )
+        .route("/user", get(provider_github::get_user))
+        // Jira API mock
+        .route(
+            "/rest/webhooks/1.0/webhook",
+            get(provider_jira::list_webhooks).post(provider_jira::create_webhook),
+        )
+        .route(
+            "/rest/webhooks/1.0/webhook/{id}",
+            axum::routing::delete(provider_jira::delete_webhook),
+        )
+        .route("/rest/api/2/myself", get(provider_jira::get_myself))
+        // ── Health check ─────────────────────────────────────────────────
         .route("/health", get(health_check))
         .with_state(app_state);
 
@@ -102,6 +156,8 @@ async fn main() {
     info!("Slack webhook URL: http://<your-host>/slack/events");
     info!("Jira webhook URL: http://<your-host>/jira/events");
     info!("GitHub webhook URL: http://<your-host>/github/events");
+    info!("Provider API mock: http://<your-host>/repos/:owner/:repo/hooks (GitHub)");
+    info!("Provider API mock: http://<your-host>/rest/webhooks/1.0/webhook (Jira)");
 
     axum::serve(listener, app)
         .await

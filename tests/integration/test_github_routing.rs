@@ -465,6 +465,103 @@ async fn test_github_body_forwarded_to_workflow() {
         .expect("Failed to cleanup workflow");
 }
 
+// ==================== Provider Interception → Secret Capture Tests ====================
+
+/// Verifies the complete provider API interception → secret capture → re-signing flow.
+///
+/// This is the critical test for the provider API mock architecture. The sequence:
+///
+/// 1. A GitHub Trigger workflow is imported and activated in n8n.
+/// 2. During activation, n8n calls `POST /repos/{owner}/{repo}/hooks` on Unihook
+///    (because the GitHub credential's `server` field points at `http://n8n-unihook:3000`).
+/// 3. Unihook's `provider_github::create_hook` handler extracts the HMAC secret from
+///    the registration body and stores it in the SQLite database.
+/// 4. The periodic trigger sync picks up the new trigger and writes it to the database.
+/// 5. A GitHub `push` event is sent to `/github/events`, signed with the inbound
+///    `GITHUB_WEBHOOK_SECRET` (for Unihook's own inbound verification).
+/// 6. Unihook queries the database for matching triggers. The query JOINs with
+///    `webhook_secrets` to include the captured per-workflow HMAC secret.
+/// 7. Unihook re-signs the payload with the per-workflow secret and forwards it to
+///    n8n's webhook endpoint.
+/// 8. n8n verifies the signature using its own generated secret. If the signature
+///    matches, the workflow executes. If not, n8n returns 401 and the event is dropped.
+///
+/// By asserting that the workflow executed, we prove every link in the chain works:
+/// secret captured → stored in DB → retrieved at routing time → used for re-signing
+/// → n8n accepted the re-signed payload.
+#[tokio::test]
+async fn test_github_provider_interception_captures_secret_for_resign() {
+    let env = TestEnvironment::new(false)
+        .await
+        .expect("Failed to create test environment");
+
+    // Clean slate — ensure no leftover triggers or secrets
+    env.cleanup_all().await.expect("Failed to cleanup");
+    assert!(
+        wait_for_github_trigger_count(&env, 0).await,
+        "Expected GitHub trigger count to reach 0 after cleanup"
+    );
+
+    // Step 1: Import and activate a GitHub Trigger workflow.
+    //
+    // On activation, n8n calls POST /repos/test-owner/test-repo/hooks on Unihook.
+    // The request body includes: { "config": { "secret": "<hmac-secret>" } }
+    // Unihook's create_hook handler captures this secret in the database.
+    let workflow = load_workflow("github_push_trigger");
+    let created = env.setup_workflow(&workflow).await.expect(
+        "Failed to setup workflow — n8n may have failed to register the \
+                 webhook via Unihook's mock GitHub API endpoint",
+    );
+
+    // Step 2: Wait for Unihook's trigger sync to pick up the new trigger.
+    // This also confirms the DB has the trigger metadata that will be
+    // JOINed with the captured secret at routing time.
+    assert!(
+        wait_for_github_trigger_count(&env, 1).await,
+        "Expected GitHub trigger count to reach 1 after activating workflow"
+    );
+
+    let initial_count = get_execution_count(&env, &created.id).await;
+
+    // Step 3: Send a GitHub push event. Unihook will:
+    //   a) Verify the inbound signature (GITHUB_WEBHOOK_SECRET)
+    //   b) Look up matching triggers in the DB (JOINing with webhook_secrets)
+    //   c) Re-sign the payload with the per-workflow secret captured in step 1
+    //   d) Forward the re-signed payload to n8n's webhook endpoint
+    let payload = create_github_push_payload("test-owner", "test-repo");
+    let response = env
+        .send_github_event("push", &payload)
+        .await
+        .expect("Failed to send event");
+
+    assert!(
+        response.status().is_success(),
+        "Expected 200 OK from /github/events, got: {} — this may indicate \
+         Unihook failed to capture or use the per-workflow HMAC secret",
+        response.status()
+    );
+
+    // Step 4: Assert the workflow actually executed.
+    //
+    // If the captured secret was wrong or missing, n8n would have returned 401
+    // and the workflow would NOT execute. A successful execution proves the
+    // entire chain: provider interception → DB storage → JOIN query → re-signing
+    // → n8n signature verification → workflow execution.
+    let execution_occurred = wait_for_execution(&env, &created.id, initial_count + 1).await;
+    assert!(
+        execution_occurred,
+        "Expected workflow execution — if this fails, Unihook likely did not \
+         capture the HMAC secret from n8n's webhook registration call, or \
+         re-signed the payload with the wrong secret (n8n returned 401)"
+    );
+
+    // Cleanup — deactivation will also trigger DELETE /repos/:owner/:repo/hooks/:id
+    // on Unihook, removing the secret from the database
+    env.cleanup_workflow(&created.id)
+        .await
+        .expect("Failed to cleanup workflow");
+}
+
 // ==================== Health Check Integration ====================
 
 #[tokio::test]

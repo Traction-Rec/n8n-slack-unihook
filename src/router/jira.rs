@@ -1,8 +1,7 @@
 use crate::config::Config;
-use crate::jira::JiraTriggerConfig;
+use crate::db::Database;
 use crate::n8n::N8nClient;
 use axum::http::HeaderMap;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -10,12 +9,15 @@ use tracing::{debug, error, info, warn};
 
 use super::forward_to_webhook;
 
-/// The Jira routing engine that manages trigger configurations and forwards events
+/// The Jira routing engine that manages trigger configurations and forwards events.
+///
+/// Trigger metadata is stored in SQLite. The periodic refresh job writes to
+/// the database, and routing reads from it.
 pub struct JiraRouter {
-    /// Cached Jira trigger configurations
-    triggers: Arc<RwLock<Vec<JiraTriggerConfig>>>,
+    /// Shared database handle
+    db: Arc<Database>,
 
-    /// n8n API client (shared with Slack router)
+    /// n8n API client (shared with other routers)
     n8n_client: Arc<N8nClient>,
 
     /// Configuration
@@ -24,9 +26,9 @@ pub struct JiraRouter {
 
 impl JiraRouter {
     /// Create a new Jira router instance
-    pub fn new(config: Arc<Config>, n8n_client: Arc<N8nClient>) -> Self {
+    pub fn new(config: Arc<Config>, n8n_client: Arc<N8nClient>, db: Arc<Database>) -> Self {
         Self {
-            triggers: Arc::new(RwLock::new(Vec::new())),
+            db,
             n8n_client,
             config,
         }
@@ -54,27 +56,40 @@ impl JiraRouter {
         });
     }
 
-    /// Refresh the Jira trigger configurations from n8n
+    /// Refresh the Jira trigger configurations from n8n and write to DB
     async fn refresh_triggers(&self) -> Result<(), crate::n8n::N8nClientError> {
         info!("Refreshing Jira trigger configurations from n8n");
         let new_triggers = self.n8n_client.fetch_jira_triggers().await?;
 
-        let mut triggers = self.triggers.write();
-        *triggers = new_triggers;
+        if let Err(e) = self.db.sync_jira_triggers(&new_triggers) {
+            warn!(error = %e, "Failed to sync Jira triggers to database");
+        }
 
         Ok(())
     }
 
-    /// Route a Jira event to all matching triggers
+    /// Reconstruct the production webhook URL for a trigger.
+    fn build_webhook_url(&self, webhook_id: &str) -> String {
+        let base = self.config.n8n_api_url.trim_end_matches('/');
+        format!(
+            "{}/{}/{}/webhook",
+            base, self.config.n8n_endpoint_webhook, webhook_id
+        )
+    }
+
+    /// Reconstruct the test webhook URL for a trigger.
+    fn build_test_webhook_url(&self, webhook_id: &str) -> String {
+        let base = self.config.n8n_api_url.trim_end_matches('/');
+        format!(
+            "{}/{}/{}/webhook",
+            base, self.config.n8n_endpoint_webhook_test, webhook_id
+        )
+    }
+
+    /// Route a Jira event to all matching triggers.
     ///
-    /// The `raw_body` parameter is the exact raw request body from Jira.
-    /// This must be forwarded as-is (not re-serialized) to preserve the
-    /// payload integrity and any authentication data.
-    ///
-    /// The optional `query_string` is the raw query string from the inbound
-    /// request (e.g. `"secret=abc123"`). When present it is appended to the
-    /// n8n webhook URL so that n8n's `authenticateWebhook` / `httpQueryAuth`
-    /// credential validation works transparently.
+    /// Reads triggers from the database, filters by event type, reconstructs
+    /// webhook URLs, and forwards.
     pub async fn route_event(
         &self,
         webhook_event: &str,
@@ -87,15 +102,20 @@ impl JiraRouter {
             "Routing Jira event"
         );
 
-        // Get matching triggers
-        let matching_triggers: Vec<JiraTriggerConfig> = {
-            let triggers = self.triggers.read();
-            triggers
-                .iter()
-                .filter(|t| t.matches_event(webhook_event))
-                .cloned()
-                .collect()
+        // Get all Jira triggers from the database
+        let all_rows = match self.db.query_jira_triggers() {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!(error = %e, "Failed to query Jira triggers from database");
+                return;
+            }
         };
+
+        // Filter by event type
+        let matching_triggers: Vec<_> = all_rows
+            .iter()
+            .filter(|t| t.events.iter().any(|e| e == "*" || e == webhook_event))
+            .collect();
 
         if matching_triggers.is_empty() {
             debug!(
@@ -116,18 +136,18 @@ impl JiraRouter {
         let raw_body = Arc::new(raw_body);
         let query_string = Arc::new(query_string);
 
-        // Forward to all matching triggers concurrently
-        // - Production webhooks: only for active workflows
-        // - Test webhooks: for all workflows (allows testing before activation)
         let mut forwards = Vec::new();
 
         for trigger in &matching_triggers {
             let client = self.n8n_client.clone();
             let workflow_name = trigger.workflow_name.clone();
 
-            // Append query string to webhook URLs if present
-            let prod_url = append_query_string(&trigger.webhook_url, &query_string);
-            let test_url = append_query_string(&trigger.test_webhook_url, &query_string);
+            let prod_url =
+                append_query_string(&self.build_webhook_url(&trigger.webhook_id), &query_string);
+            let test_url = append_query_string(
+                &self.build_test_webhook_url(&trigger.webhook_id),
+                &query_string,
+            );
 
             // Production webhook - only for active workflows
             if trigger.workflow_active {
@@ -153,7 +173,7 @@ impl JiraRouter {
                 );
             }
 
-            // Test webhook - always forward (for development and testing)
+            // Test webhook - always forward
             let test_client = client.clone();
             let test_name = workflow_name.clone();
             let test_body = raw_body.clone();
@@ -171,7 +191,6 @@ impl JiraRouter {
             }));
         }
 
-        // Wait for all forwards to complete (ignoring join errors)
         for handle in forwards {
             let _ = handle.await;
         }
@@ -179,14 +198,11 @@ impl JiraRouter {
 
     /// Get the current number of loaded Jira triggers (for health checks)
     pub fn trigger_count(&self) -> usize {
-        self.triggers.read().len()
+        self.db.count_jira_triggers().unwrap_or(0)
     }
 }
 
 /// Append an optional query string to a URL.
-///
-/// If the URL already contains a query string (from the trigger config),
-/// the new parameters are appended with `&`. Otherwise `?` is used.
 fn append_query_string(url: &str, query_string: &Option<String>) -> String {
     match query_string {
         Some(qs) if !qs.is_empty() => {

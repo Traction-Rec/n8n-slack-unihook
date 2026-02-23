@@ -1,9 +1,8 @@
 use crate::config::Config;
 use crate::crypto::compute_hmac_sha256;
-use crate::github::GitHubTriggerConfig;
+use crate::db::{Database, GitHubTriggerRow};
 use crate::n8n::N8nClient;
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
-use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,10 +11,13 @@ use tracing::{debug, error, info, warn};
 
 use super::forward_to_webhook;
 
-/// The GitHub routing engine that manages trigger configurations and forwards events
+/// The GitHub routing engine that manages trigger configurations and forwards events.
+///
+/// Trigger metadata and webhook secrets are stored in SQLite. The periodic
+/// refresh job writes to the database, and routing reads from it.
 pub struct GitHubRouter {
-    /// Cached GitHub trigger configurations
-    triggers: Arc<RwLock<Vec<GitHubTriggerConfig>>>,
+    /// Shared database handle
+    db: Arc<Database>,
 
     /// n8n API client (shared with other routers)
     n8n_client: Arc<N8nClient>,
@@ -26,9 +28,9 @@ pub struct GitHubRouter {
 
 impl GitHubRouter {
     /// Create a new GitHub router instance
-    pub fn new(config: Arc<Config>, n8n_client: Arc<N8nClient>) -> Self {
+    pub fn new(config: Arc<Config>, n8n_client: Arc<N8nClient>, db: Arc<Database>) -> Self {
         Self {
-            triggers: Arc::new(RwLock::new(Vec::new())),
+            db,
             n8n_client,
             config,
         }
@@ -56,35 +58,64 @@ impl GitHubRouter {
         });
     }
 
-    /// Refresh the GitHub trigger configurations from n8n
+    /// Refresh the GitHub trigger configurations from n8n and write to DB.
+    ///
+    /// Also persists any `webhook_secret` from `staticData` as a fallback
+    /// (will not overwrite secrets already captured by the provider mock).
     async fn refresh_triggers(&self) -> Result<(), crate::n8n::N8nClientError> {
         info!("Refreshing GitHub trigger configurations from n8n");
         let new_triggers = self.n8n_client.fetch_github_triggers().await?;
 
-        let mut triggers = self.triggers.write();
-        *triggers = new_triggers;
+        // Persist fallback secrets from staticData before syncing triggers
+        for trigger in &new_triggers {
+            if let Some(ref secret) = trigger.webhook_secret
+                && let Err(e) =
+                    self.db
+                        .upsert_webhook_secret_fallback(&trigger.webhook_id, "github", secret)
+            {
+                warn!(
+                    error = %e,
+                    webhook_id = %trigger.webhook_id,
+                    "Failed to persist staticData webhook secret"
+                );
+            }
+        }
+
+        // Sync trigger metadata to the database
+        if let Err(e) = self.db.sync_github_triggers(&new_triggers) {
+            warn!(error = %e, "Failed to sync GitHub triggers to database");
+        }
 
         Ok(())
     }
 
-    /// Route a GitHub event to all matching triggers
+    /// Reconstruct the production webhook URL for a trigger row.
+    fn build_webhook_url(&self, webhook_id: &str) -> String {
+        let base = self.config.n8n_api_url.trim_end_matches('/');
+        format!(
+            "{}/{}/{}/webhook",
+            base, self.config.n8n_endpoint_webhook, webhook_id
+        )
+    }
+
+    /// Reconstruct the test webhook URL for a trigger row.
+    fn build_test_webhook_url(&self, webhook_id: &str) -> String {
+        let base = self.config.n8n_api_url.trim_end_matches('/');
+        format!(
+            "{}/{}/{}/webhook",
+            base, self.config.n8n_endpoint_webhook_test, webhook_id
+        )
+    }
+
+    /// Route a GitHub event to all matching triggers.
     ///
-    /// The `raw_body` parameter is the exact raw request body from GitHub.
-    /// This must be forwarded as-is (not re-serialized) to preserve the
-    /// payload integrity.
-    ///
-    /// For each matching trigger, the middleware re-signs the body with n8n's
-    /// webhook secret (from the workflow's `staticData`) and sets the
-    /// `X-Hub-Signature-256` header. This is necessary because n8n's GitHub
-    /// Trigger node verifies the HMAC-SHA256 signature on every incoming
-    /// webhook delivery, and the original signature from GitHub (if any)
-    /// was computed with a different secret than what n8n expects.
+    /// Reads matching triggers from the database (which JOINs webhook_secrets
+    /// so the HMAC secret is included). For each matching trigger, re-signs
+    /// the payload and forwards to both production and test webhook URLs.
     ///
     /// If any forward returns a 401 or if a trigger's webhook secret was
     /// missing, the router will immediately refresh its trigger cache from
-    /// the n8n API and retry those specific deliveries. This handles the
-    /// common case where a workflow was just activated and the periodic
-    /// refresh hasn't picked up the new `staticData` yet.
+    /// the n8n API and retry those specific deliveries.
     pub async fn route_event(
         &self,
         event_type: &str,
@@ -100,15 +131,20 @@ impl GitHubRouter {
             "Routing GitHub event"
         );
 
-        // Get matching triggers
-        let matching_triggers: Vec<GitHubTriggerConfig> = {
-            let triggers = self.triggers.read();
-            triggers
-                .iter()
-                .filter(|t| t.matches_event(event_type, owner, repository))
-                .cloned()
-                .collect()
+        // Get matching triggers from the database
+        let all_rows = match self.db.query_github_triggers(owner, repository) {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!(error = %e, "Failed to query GitHub triggers from database");
+                return;
+            }
         };
+
+        // Filter by event type (the DB doesn't filter events for us)
+        let matching_triggers: Vec<&GitHubTriggerRow> = all_rows
+            .iter()
+            .filter(|t| t.events.iter().any(|e| e == "*" || e == event_type))
+            .collect();
 
         if matching_triggers.is_empty() {
             debug!(
@@ -131,7 +167,6 @@ impl GitHubRouter {
         let raw_body = Arc::new(raw_body);
 
         // Phase 1: Forward to all matching triggers concurrently and collect results.
-        // Each result is paired with metadata so we can decide which need a retry.
         let results = self
             .forward_all(&matching_triggers, &raw_body, &headers)
             .await;
@@ -147,7 +182,7 @@ impl GitHubRouter {
             return;
         }
 
-        warn!(
+        info!(
             retry_count = retry_urls.len(),
             "Got 401 or missing webhook secret; refreshing triggers from n8n API and retrying"
         );
@@ -158,46 +193,58 @@ impl GitHubRouter {
             return;
         }
 
-        // Get the refreshed matching triggers
-        let fresh_triggers: Vec<GitHubTriggerConfig> = {
-            let triggers = self.triggers.read();
-            triggers
-                .iter()
-                .filter(|t| t.matches_event(event_type, owner, repository))
-                .cloned()
-                .collect()
+        // Re-query the database for matching triggers (now with fresh data)
+        let fresh_rows = match self.db.query_github_triggers(owner, repository) {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!(error = %e, "Failed to re-query GitHub triggers after refresh");
+                return;
+            }
         };
 
-        // Phase 3: Retry only the specific webhook URLs that failed, using the
-        // refreshed trigger configs (which should now have the webhook secret).
+        let fresh_matching: Vec<&GitHubTriggerRow> = fresh_rows
+            .iter()
+            .filter(|t| t.events.iter().any(|e| e == "*" || e == event_type))
+            .collect();
+
+        // Phase 3: Retry only the specific webhook URLs that failed.
         let mut retry_forwards = Vec::new();
-        for trigger in &fresh_triggers {
+        for trigger in &fresh_matching {
             let signed_headers = Arc::new(Self::build_signed_headers(
                 &headers,
                 &raw_body,
-                trigger.webhook_secret.as_deref(),
+                trigger.secret.as_deref(),
             ));
 
-            if trigger.workflow_active && retry_urls.contains(&trigger.webhook_url) {
+            let prod_url = self.build_webhook_url(&trigger.webhook_id);
+            let test_url = self.build_test_webhook_url(&trigger.webhook_id);
+
+            if trigger.workflow_active && retry_urls.contains(&prod_url) {
                 let client = self.n8n_client.clone();
-                let url = trigger.webhook_url.clone();
                 let name = trigger.workflow_name.clone();
                 let body = raw_body.clone();
                 let hdrs = signed_headers.clone();
                 retry_forwards.push(tokio::spawn(async move {
-                    forward_to_webhook(&client, &url, &name, "production (retry)", &body, &hdrs)
-                        .await
+                    forward_to_webhook(
+                        &client,
+                        &prod_url,
+                        &name,
+                        "production (retry)",
+                        &body,
+                        &hdrs,
+                    )
+                    .await
                 }));
             }
 
-            if retry_urls.contains(&trigger.test_webhook_url) {
+            if retry_urls.contains(&test_url) {
                 let client = self.n8n_client.clone();
-                let url = trigger.test_webhook_url.clone();
                 let name = trigger.workflow_name.clone();
                 let body = raw_body.clone();
                 let hdrs = signed_headers.clone();
                 retry_forwards.push(tokio::spawn(async move {
-                    forward_to_webhook(&client, &url, &name, "test (retry)", &body, &hdrs).await
+                    forward_to_webhook(&client, &test_url, &name, "test (retry)", &body, &hdrs)
+                        .await
                 }));
             }
         }
@@ -207,34 +254,36 @@ impl GitHubRouter {
         }
     }
 
-    /// Forward a GitHub event to all matching triggers concurrently and return
-    /// the result of each forward attempt.
+    /// Forward a GitHub event to all matching triggers concurrently.
     async fn forward_all(
         &self,
-        triggers: &[GitHubTriggerConfig],
+        triggers: &[&GitHubTriggerRow],
         raw_body: &Arc<String>,
         headers: &HeaderMap,
     ) -> Vec<ForwardResult> {
         let mut jobs: Vec<(tokio::task::JoinHandle<Option<u16>>, ForwardResult)> = Vec::new();
 
         for trigger in triggers {
-            let had_secret = trigger.webhook_secret.is_some();
+            let had_secret = trigger.secret.is_some();
             let signed_headers = Arc::new(Self::build_signed_headers(
                 headers,
                 raw_body,
-                trigger.webhook_secret.as_deref(),
+                trigger.secret.as_deref(),
             ));
+
+            let prod_url = self.build_webhook_url(&trigger.webhook_id);
+            let test_url = self.build_test_webhook_url(&trigger.webhook_id);
 
             // Production webhook — only for active workflows
             if trigger.workflow_active {
                 let client = self.n8n_client.clone();
-                let url = trigger.webhook_url.clone();
                 let name = trigger.workflow_name.clone();
                 let body = raw_body.clone();
                 let hdrs = signed_headers.clone();
+                let url = prod_url.clone();
 
                 let meta = ForwardResult {
-                    webhook_url: trigger.webhook_url.clone(),
+                    webhook_url: prod_url,
                     had_secret,
                     status: None,
                 };
@@ -252,13 +301,13 @@ impl GitHubRouter {
             // Test webhook — always forward (for development and testing)
             {
                 let client = self.n8n_client.clone();
-                let url = trigger.test_webhook_url.clone();
                 let name = trigger.workflow_name.clone();
                 let body = raw_body.clone();
                 let hdrs = signed_headers.clone();
+                let url = test_url.clone();
 
                 let meta = ForwardResult {
-                    webhook_url: trigger.test_webhook_url.clone(),
+                    webhook_url: test_url,
                     had_secret,
                     status: None,
                 };
@@ -279,18 +328,6 @@ impl GitHubRouter {
     }
 
     /// Build forwarded headers with a re-computed `X-Hub-Signature-256`.
-    ///
-    /// n8n's GitHub Trigger node verifies the HMAC-SHA256 signature on every
-    /// incoming webhook delivery using the secret it generated during workflow
-    /// activation. Since the original `X-Hub-Signature-256` from GitHub was
-    /// computed with that same secret (sent to GitHub's API), it would normally
-    /// be valid. However, in our middleware architecture the event arrives from
-    /// GitHub signed with a *different* secret (the one the user configured on
-    /// the GitHub → middleware webhook), so we must re-sign with n8n's secret.
-    ///
-    /// If no secret is available (e.g., the workflow hasn't been activated yet
-    /// or staticData wasn't populated), we forward the original headers as-is
-    /// and let n8n decide whether to accept or reject.
     fn build_signed_headers(
         original_headers: &HeaderMap,
         body: &str,
@@ -301,7 +338,6 @@ impl GitHubRouter {
         if let Some(secret) = webhook_secret {
             let signature = compute_hmac_sha256(secret, body.as_bytes());
 
-            // Replace or insert the signature header
             headers.insert(
                 HeaderName::from_static("x-hub-signature-256"),
                 HeaderValue::from_str(&signature).expect("signature is valid ASCII"),
@@ -320,18 +356,15 @@ impl GitHubRouter {
 
     /// Get the current number of loaded GitHub triggers (for health checks)
     pub fn trigger_count(&self) -> usize {
-        self.triggers.read().len()
+        self.db.count_github_triggers().unwrap_or(0)
     }
 }
 
 /// Result of a single webhook forward attempt, used to decide whether a retry
 /// is needed after refreshing the trigger cache.
 struct ForwardResult {
-    /// The webhook URL that was called
     webhook_url: String,
-    /// Whether the trigger had a webhook secret at the time of the attempt
     had_secret: bool,
-    /// HTTP status returned by n8n, or `None` if the connection failed entirely
     status: Option<u16>,
 }
 
@@ -339,6 +372,7 @@ struct ForwardResult {
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::db::Database;
     use crate::github::GitHubTriggerConfig;
     use wiremock::matchers::{method, path, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -349,25 +383,30 @@ mod tests {
             n8n_api_url: base_url.to_string(),
             n8n_api_key: "test-api-key".to_string(),
             listen_addr: "0.0.0.0:3000".to_string(),
-            refresh_interval_secs: 600, // long — we don't want the background task interfering
+            refresh_interval_secs: 600,
             n8n_endpoint_webhook: "webhook".to_string(),
             n8n_endpoint_webhook_test: "webhook-test".to_string(),
             github_webhook_secret: None,
+            database_path: ":memory:".to_string(),
         })
     }
 
-    /// Build a trigger config that points its webhook URLs at the mock server.
-    fn seed_trigger(base_url: &str, secret: Option<&str>) -> GitHubTriggerConfig {
-        GitHubTriggerConfig {
+    /// Seed a GitHub trigger into the database, optionally with a webhook secret.
+    fn seed_trigger(db: &Arc<Database>, secret: Option<&str>) {
+        let triggers = vec![GitHubTriggerConfig {
+            webhook_id: "wh1".to_string(),
             workflow_id: "wf1".to_string(),
             workflow_name: "Test Workflow".to_string(),
             workflow_active: true,
-            webhook_url: format!("{}/webhook/wh1/webhook", base_url),
-            test_webhook_url: format!("{}/webhook-test/wh1/webhook", base_url),
             events: vec!["push".to_string()],
             owner: "test-owner".to_string(),
             repository: "test-repo".to_string(),
-            webhook_secret: secret.map(|s| s.to_string()),
+            webhook_secret: None,
+        }];
+        db.sync_github_triggers(&triggers).unwrap();
+
+        if let Some(s) = secret {
+            db.upsert_webhook_secret("wh1", "github", s).unwrap();
         }
     }
 
@@ -402,8 +441,6 @@ mod tests {
 
     // ==================== Happy-path: no retry needed ====================
 
-    /// When all forwards succeed (200) and the trigger has a secret, no
-    /// refresh or retry should occur.
     #[tokio::test]
     async fn test_no_retry_when_all_forwards_succeed() {
         let mock_server = MockServer::start().await;
@@ -411,15 +448,11 @@ mod tests {
 
         let config = test_config(&base_url);
         let n8n_client = Arc::new(N8nClient::new(config.clone()));
-        let router = GitHubRouter::new(config, n8n_client);
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let router = GitHubRouter::new(config, n8n_client, db.clone());
 
-        // Pre-seed with a trigger that already has a valid secret
-        {
-            let mut triggers = router.triggers.write();
-            triggers.push(seed_trigger(&base_url, Some("good-secret")));
-        }
+        seed_trigger(&db, Some("good-secret"));
 
-        // Webhook forwards should succeed — expect exactly 2 (production + test)
         Mock::given(method("POST"))
             .and(path_regex("/wh1/webhook"))
             .respond_with(ResponseTemplate::new(200))
@@ -427,7 +460,6 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        // API should NOT be called — no refresh needed
         Mock::given(method("GET"))
             .and(path("/api/v1/workflows"))
             .respond_with(ResponseTemplate::new(200))
@@ -444,18 +476,10 @@ mod tests {
                 HeaderMap::new(),
             )
             .await;
-
-        // wiremock verifies on drop: 2 POSTs, 0 GETs
     }
 
     // ==================== Retry on 401 ====================
 
-    /// When the cached trigger has a stale secret, the initial forward gets
-    /// 401. The router should refresh triggers from the API and retry.
-    /// Expects:
-    ///   4× POST (2 initial + 2 retry — all return 401 from the mock, but
-    ///            the retry results are discarded so no infinite loop)
-    ///   1× GET  /api/v1/workflows (refresh)
     #[tokio::test]
     async fn test_retry_on_401_refreshes_triggers_and_retries() {
         let mock_server = MockServer::start().await;
@@ -463,16 +487,11 @@ mod tests {
 
         let config = test_config(&base_url);
         let n8n_client = Arc::new(N8nClient::new(config.clone()));
-        let router = GitHubRouter::new(config, n8n_client);
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let router = GitHubRouter::new(config, n8n_client, db.clone());
 
-        // Pre-seed with a trigger whose secret is stale
-        {
-            let mut triggers = router.triggers.write();
-            triggers.push(seed_trigger(&base_url, Some("old-secret")));
-        }
+        seed_trigger(&db, Some("old-secret"));
 
-        // All webhook forwards return 401 (both initial and retry).
-        // The retry results are not inspected, so no infinite loop occurs.
         Mock::given(method("POST"))
             .and(path_regex("/wh1/webhook"))
             .respond_with(ResponseTemplate::new(401))
@@ -480,7 +499,6 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        // API refresh returns workflow with the new secret
         Mock::given(method("GET"))
             .and(path("/api/v1/workflows"))
             .respond_with(
@@ -499,16 +517,10 @@ mod tests {
                 HeaderMap::new(),
             )
             .await;
-
-        // wiremock verifies on drop:
-        //   4× POST 401 (2 initial + 2 retry), 1× GET (refresh)
     }
 
     // ==================== Retry on missing secret ====================
 
-    /// When the cached trigger has no webhook secret at all (e.g. workflow
-    /// just activated, staticData not yet synced), the router should refresh
-    /// and retry regardless of the forward's HTTP status.
     #[tokio::test]
     async fn test_retry_on_missing_secret_refreshes_and_retries() {
         let mock_server = MockServer::start().await;
@@ -516,15 +528,12 @@ mod tests {
 
         let config = test_config(&base_url);
         let n8n_client = Arc::new(N8nClient::new(config.clone()));
-        let router = GitHubRouter::new(config, n8n_client);
+        let db = Arc::new(Database::open(":memory:").unwrap());
+        let router = GitHubRouter::new(config, n8n_client, db.clone());
 
-        // Pre-seed with a trigger that has NO secret
-        {
-            let mut triggers = router.triggers.write();
-            triggers.push(seed_trigger(&base_url, None));
-        }
+        // Seed trigger with NO secret
+        seed_trigger(&db, None);
 
-        // All forwards return 200 — doesn't matter, retry is triggered by !had_secret
         Mock::given(method("POST"))
             .and(path_regex("/wh1/webhook"))
             .respond_with(ResponseTemplate::new(200))
@@ -532,7 +541,6 @@ mod tests {
             .mount(&mock_server)
             .await;
 
-        // API refresh returns the trigger with a secret
         Mock::given(method("GET"))
             .and(path("/api/v1/workflows"))
             .respond_with(
@@ -551,8 +559,5 @@ mod tests {
                 HeaderMap::new(),
             )
             .await;
-
-        // wiremock verifies on drop:
-        //   4× POST (2 initial + 2 retry), 1× GET (refresh)
     }
 }

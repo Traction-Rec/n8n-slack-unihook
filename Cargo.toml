@@ -1,6 +1,6 @@
 [package]
-name = "n8n-slack-unihook"
-version = "0.3.1"
+name = "n8n-unihook"
+version = "0.4.0"
 edition = "2024"
 description = "A Slack event router for n8n that enables multiple workflows to share a single Slack app webhook"
 license = "MIT"
@@ -35,6 +35,9 @@ thiserror = "2"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+
+# SQLite database (webhook secret storage & trigger metadata)
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 # For integration tests

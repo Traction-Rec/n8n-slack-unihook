@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::github::triggers::{GitHubTriggerConfig, parse_github_trigger};
 use crate::jira::triggers::{JiraTriggerConfig, parse_jira_trigger};
-use crate::n8n::models::{WebhookEndpoints, WorkflowsResponse};
+use crate::n8n::models::WorkflowsResponse;
 use crate::slack::triggers::{SlackTriggerConfig, parse_slack_trigger};
 use axum::http::HeaderMap;
 use reqwest::Client;
@@ -12,21 +12,12 @@ use tracing::{debug, error, info, warn};
 pub struct N8nClient {
     client: Client,
     config: Arc<Config>,
-    webhook_endpoints: WebhookEndpoints,
 }
 
 impl N8nClient {
     pub fn new(config: Arc<Config>) -> Self {
         let client = Client::new();
-        let webhook_endpoints = WebhookEndpoints {
-            production: config.n8n_endpoint_webhook.clone(),
-            test: config.n8n_endpoint_webhook_test.clone(),
-        };
-        Self {
-            client,
-            config,
-            webhook_endpoints,
-        }
+        Self { client, config }
     }
 
     /// Fetch all active workflows and extract Slack trigger configurations
@@ -43,12 +34,7 @@ impl N8nClient {
                 // - Active workflows: forward to both production and test webhooks
                 // - Inactive workflows: forward only to test webhooks (for development)
                 for node in &workflow.nodes {
-                    if let Some(trigger) = parse_slack_trigger(
-                        &workflow,
-                        node,
-                        &self.config.n8n_api_url,
-                        &self.webhook_endpoints,
-                    ) {
+                    if let Some(trigger) = parse_slack_trigger(&workflow, node) {
                         info!(
                             workflow_id = %trigger.workflow_id,
                             workflow_name = %trigger.workflow_name,
@@ -91,12 +77,7 @@ impl N8nClient {
                 // - Active workflows: forward to both production and test webhooks
                 // - Inactive workflows: forward only to test webhooks (for development)
                 for node in &workflow.nodes {
-                    if let Some(trigger) = parse_jira_trigger(
-                        &workflow,
-                        node,
-                        &self.config.n8n_api_url,
-                        &self.webhook_endpoints,
-                    ) {
+                    if let Some(trigger) = parse_jira_trigger(&workflow, node) {
                         info!(
                             workflow_id = %trigger.workflow_id,
                             workflow_name = %trigger.workflow_name,
@@ -134,12 +115,7 @@ impl N8nClient {
                 // - Active workflows: forward to both production and test webhooks
                 // - Inactive workflows: forward only to test webhooks (for development)
                 for node in &workflow.nodes {
-                    if let Some(trigger) = parse_github_trigger(
-                        &workflow,
-                        node,
-                        &self.config.n8n_api_url,
-                        &self.webhook_endpoints,
-                    ) {
+                    if let Some(trigger) = parse_github_trigger(&workflow, node) {
                         info!(
                             workflow_id = %trigger.workflow_id,
                             workflow_name = %trigger.workflow_name,

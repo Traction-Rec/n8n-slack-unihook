@@ -29,10 +29,12 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from the build stage
-COPY --from=builder /app/target/release/n8n-slack-unihook /usr/local/bin/n8n-slack-unihook
+COPY --from=builder /app/target/release/n8n-unihook /usr/local/bin/n8n-unihook
 
-# Create a non-root user
-RUN useradd --create-home --shell /bin/bash appuser
+# Create a non-root user and a writable data directory for the SQLite database
+RUN useradd --create-home --shell /bin/bash appuser \
+    && mkdir -p /data \
+    && chown appuser:appuser /data
 USER appuser
 
 # Default environment variables
@@ -48,4 +50,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:3000/health || exit 1
 
 # Run the application
-CMD ["n8n-slack-unihook"]
+CMD ["n8n-unihook"]

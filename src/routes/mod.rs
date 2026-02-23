@@ -1,5 +1,7 @@
 pub mod github;
 pub mod jira;
+pub mod provider_github;
+pub mod provider_jira;
 pub mod slack;
 
 pub use github::handle_github_event;
@@ -7,6 +9,7 @@ pub use jira::handle_jira_event;
 pub use slack::handle_slack_event;
 
 use crate::config::Config;
+use crate::db::Database;
 use crate::router::{GitHubRouter, JiraRouter, SlackRouter};
 use axum::{
     extract::State,
@@ -21,6 +24,7 @@ pub struct AppState {
     pub jira_router: Arc<JiraRouter>,
     pub github_router: Arc<GitHubRouter>,
     pub config: Arc<Config>,
+    pub db: Arc<Database>,
 }
 
 /// Extract headers that should be forwarded to n8n, filtering by allowed prefixes.

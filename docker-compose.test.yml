@@ -1,8 +1,17 @@
-# Integration test environment for n8n-slack-unihook
-# Usage: 
-#   1. Start n8n: docker compose -f docker-compose.test.yml up -d n8n
-#   2. Run setup script to get API key
-#   3. Start n8n-slack-unihook with API key: N8N_API_KEY=xxx docker compose -f docker-compose.test.yml up -d n8n-slack-unihook
+# Integration test environment for n8n-unihook
+#
+# The test script (scripts/run-integration-tests.sh) orchestrates the startup:
+#
+#   1. Start n8n + n8n-unihook (unihook boots with an empty API key so
+#      it can serve mock provider API endpoints while n8n credentials are set up).
+#   2. Set up n8n owner, create an API key, and create "dud" credentials
+#      pointing their external API endpoints at n8n-unihook:3000.
+#   3. Restart n8n-unihook with the real API key so trigger sync works.
+#   4. Run integration tests.
+#
+# Unihook's built-in provider API mock routes (/repos/:owner/:repo/hooks,
+# /rest/webhooks/1.0/webhook, etc.) replace the previously separate nginx
+# mock-apis container.
 
 services:
   n8n:
@@ -37,48 +46,26 @@ services:
       retries: 10
       start_period: 10s
 
-  # Mock API server — required for trigger node workflow activation.
-  #
-  # Several n8n trigger nodes (Jira Trigger, GitHub Trigger) unconditionally
-  # register webhooks with their respective external APIs during workflow
-  # activation. There is no env var to disable this. This single nginx mock
-  # responds to all those API calls so workflows can be activated without
-  # real external service accounts.
-  #
-  # "Dud" credentials are created during test setup (see
-  # scripts/run-integration-tests.sh) with their endpoints set to
-  # http://mock-apis:8080, routing all external API calls here.
-  #
-  # See tests/integration/mock-apis/nginx.conf for full details on the
-  # endpoints served and why each one is needed.
-  mock-apis:
-    image: nginx:alpine
-    container_name: mock-apis-test
-    volumes:
-      - ./tests/integration/mock-apis/nginx.conf:/etc/nginx/nginx.conf:ro
-    networks:
-      - test-network
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/"]
-      interval: 3s
-      timeout: 2s
-      retries: 5
-      start_period: 2s
-
-  n8n-slack-unihook:
+  n8n-unihook:
     build: .
-    container_name: n8n-slack-unihook-test
+    container_name: n8n-unihook-test
     ports:
       - "3000:3000"
     environment:
-      # API key must be provided - set via environment before starting
+      # API key — initially empty so unihook can boot and serve mock provider
+      # endpoints while n8n is being configured.  The test script restarts
+      # this container with the real key once it's been created.
       - N8N_API_KEY=${N8N_API_KEY:-}
       - N8N_API_URL=http://n8n:6789
       - LISTEN_ADDR=0.0.0.0:3000
       - REFRESH_INTERVAL_SECS=5
-      - RUST_LOG=slack_unihook=debug
+      - RUST_LOG=n8n_slack_unihook=debug
       # Webhook secret for inbound GitHub signature verification
       - GITHUB_WEBHOOK_SECRET=test-github-webhook-secret-for-integration-tests
+      # SQLite database for webhook secrets & trigger metadata
+      - DATABASE_PATH=/data/unihook.db
+    volumes:
+      - unihook_data:/data
     networks:
       - test-network
     depends_on:
@@ -97,3 +84,4 @@ networks:
 
 volumes:
   n8n_test_data:
+  unihook_data:

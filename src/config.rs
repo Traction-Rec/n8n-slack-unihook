@@ -35,6 +35,13 @@ pub struct Config {
     /// When unset, inbound verification is skipped (existing behavior).
     #[serde(default)]
     pub github_webhook_secret: Option<String>,
+
+    /// Path to the SQLite database file used for storing webhook secrets and
+    /// trigger metadata. Defaults to `"unihook.db"` in the current working
+    /// directory. Set to `":memory:"` for an in-memory database (useful for
+    /// tests).
+    #[serde(default = "default_database_path")]
+    pub database_path: String,
 }
 
 fn default_n8n_api_url() -> String {
@@ -55,6 +62,10 @@ fn default_endpoint_webhook() -> String {
 
 fn default_endpoint_webhook_test() -> String {
     "webhook-test".to_string()
+}
+
+fn default_database_path() -> String {
+    "unihook.db".to_string()
 }
 
 impl Config {

@@ -1,8 +1,8 @@
 use crate::config::Config;
+use crate::db::Database;
 use crate::n8n::N8nClient;
-use crate::slack::{SlackEventCallback, SlackTriggerConfig};
+use crate::slack::SlackEventCallback;
 use axum::http::HeaderMap;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::interval;
@@ -10,10 +10,13 @@ use tracing::{debug, error, info, warn};
 
 use super::forward_to_webhook;
 
-/// The Slack routing engine that manages trigger configurations and forwards events
+/// The Slack routing engine that manages trigger configurations and forwards events.
+///
+/// Trigger metadata is stored in SQLite. The periodic refresh job writes to
+/// the database, and routing reads from it.
 pub struct SlackRouter {
-    /// Cached trigger configurations
-    triggers: Arc<RwLock<Vec<SlackTriggerConfig>>>,
+    /// Shared database handle
+    db: Arc<Database>,
 
     /// n8n API client
     n8n_client: Arc<N8nClient>,
@@ -24,9 +27,9 @@ pub struct SlackRouter {
 
 impl SlackRouter {
     /// Create a new router instance with a shared n8n client
-    pub fn new(config: Arc<Config>, n8n_client: Arc<N8nClient>) -> Self {
+    pub fn new(config: Arc<Config>, n8n_client: Arc<N8nClient>, db: Arc<Database>) -> Self {
         Self {
-            triggers: Arc::new(RwLock::new(Vec::new())),
+            db,
             n8n_client,
             config,
         }
@@ -54,22 +57,40 @@ impl SlackRouter {
         });
     }
 
-    /// Refresh the trigger configurations from n8n
+    /// Refresh the trigger configurations from n8n and write to DB
     async fn refresh_triggers(&self) -> Result<(), crate::n8n::N8nClientError> {
         info!("Refreshing Slack trigger configurations from n8n");
         let new_triggers = self.n8n_client.fetch_slack_triggers().await?;
 
-        let mut triggers = self.triggers.write();
-        *triggers = new_triggers;
+        if let Err(e) = self.db.sync_slack_triggers(&new_triggers) {
+            warn!(error = %e, "Failed to sync Slack triggers to database");
+        }
 
         Ok(())
     }
 
-    /// Route a Slack event to all matching triggers
+    /// Reconstruct the production webhook URL for a trigger.
+    fn build_webhook_url(&self, webhook_id: &str) -> String {
+        let base = self.config.n8n_api_url.trim_end_matches('/');
+        format!(
+            "{}/{}/{}/webhook",
+            base, self.config.n8n_endpoint_webhook, webhook_id
+        )
+    }
+
+    /// Reconstruct the test webhook URL for a trigger.
+    fn build_test_webhook_url(&self, webhook_id: &str) -> String {
+        let base = self.config.n8n_api_url.trim_end_matches('/');
+        format!(
+            "{}/{}/{}/webhook",
+            base, self.config.n8n_endpoint_webhook_test, webhook_id
+        )
+    }
+
+    /// Route a Slack event to all matching triggers.
     ///
-    /// The `raw_body` parameter is the exact raw request body from Slack.
-    /// This must be forwarded as-is (not re-serialized) to preserve the
-    /// Slack signature for verification by n8n.
+    /// Reads triggers from the database, filters by event type and channel,
+    /// reconstructs webhook URLs, and forwards.
     pub async fn route_event(
         &self,
         callback: &SlackEventCallback,
@@ -88,15 +109,39 @@ impl SlackRouter {
             "Routing Slack event"
         );
 
-        // Get matching triggers
-        let matching_triggers: Vec<SlackTriggerConfig> = {
-            let triggers = self.triggers.read();
-            triggers
-                .iter()
-                .filter(|t| t.matches_event(n8n_event_type, channel))
-                .cloned()
-                .collect()
+        // Get all Slack triggers from the database
+        let all_rows = match self.db.query_slack_triggers() {
+            Ok(rows) => rows,
+            Err(e) => {
+                error!(error = %e, "Failed to query Slack triggers from database");
+                return;
+            }
         };
+
+        // Filter by event type and channel (replicating SlackTriggerConfig::matches_event logic)
+        let matching_triggers: Vec<_> = all_rows
+            .iter()
+            .filter(|t| {
+                // Event type must match (or trigger accepts any event)
+                let type_matches = t.event_type == "any_event" || t.event_type == n8n_event_type;
+                if !type_matches {
+                    return false;
+                }
+
+                // Channel must match (or trigger watches whole workspace)
+                if t.watch_whole_workspace {
+                    return true;
+                }
+
+                match channel {
+                    Some(ch) => t.channels.contains(&ch.to_string()),
+                    None => matches!(
+                        t.event_type.as_str(),
+                        "user_created" | "channel_created" | "any_event"
+                    ),
+                }
+            })
+            .collect();
 
         if matching_triggers.is_empty() {
             debug!(
@@ -118,19 +163,18 @@ impl SlackRouter {
         let headers = Arc::new(headers);
         let raw_body = Arc::new(raw_body);
 
-        // Forward to all matching triggers concurrently
-        // - Production webhooks: only for active workflows
-        // - Test webhooks: for all workflows (allows testing before activation)
         let mut forwards = Vec::new();
 
         for trigger in &matching_triggers {
             let client = self.n8n_client.clone();
             let workflow_name = trigger.workflow_name.clone();
 
+            let prod_url = self.build_webhook_url(&trigger.webhook_id);
+            let test_url = self.build_test_webhook_url(&trigger.webhook_id);
+
             // Production webhook - only for active workflows
             if trigger.workflow_active {
                 let prod_client = client.clone();
-                let prod_url = trigger.webhook_url.clone();
                 let prod_name = workflow_name.clone();
                 let prod_body = raw_body.clone();
                 let prod_headers = headers.clone();
@@ -152,9 +196,8 @@ impl SlackRouter {
                 );
             }
 
-            // Test webhook - always forward (for development and testing)
+            // Test webhook - always forward
             let test_client = client.clone();
-            let test_url = trigger.test_webhook_url.clone();
             let test_name = workflow_name.clone();
             let test_body = raw_body.clone();
             let test_headers = headers.clone();
@@ -171,7 +214,6 @@ impl SlackRouter {
             }));
         }
 
-        // Wait for all forwards to complete (ignoring join errors)
         for handle in forwards {
             let _ = handle.await;
         }
@@ -179,6 +221,6 @@ impl SlackRouter {
 
     /// Get the current number of loaded triggers (for health checks)
     pub fn trigger_count(&self) -> usize {
-        self.triggers.read().len()
+        self.db.count_slack_triggers().unwrap_or(0)
     }
 }

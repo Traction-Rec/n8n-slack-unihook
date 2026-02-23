@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  n8n-slack-unihook:
+  n8n-unihook:
     build: .
-    container_name: n8n-slack-unihook
+    container_name: n8n-unihook
     restart: unless-stopped
     ports:
       - "3000:3000"
