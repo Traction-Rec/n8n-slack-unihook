@@ -107,6 +107,16 @@ pub async fn create_hook(
         "GitHub mock: captured webhook registration"
     );
 
+    // Trigger an immediate sync so the github_triggers table is populated
+    // right away — otherwise events arriving before the next periodic refresh
+    // would find no matching trigger rows.
+    let github_router = state.github_router.clone();
+    tokio::spawn(async move {
+        if let Err(e) = github_router.refresh_triggers().await {
+            warn!(error = %e, "GitHub mock: failed to refresh triggers after webhook registration");
+        }
+    });
+
     (
         StatusCode::CREATED,
         Json(serde_json::json!({

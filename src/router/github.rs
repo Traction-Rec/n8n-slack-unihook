@@ -62,7 +62,12 @@ impl GitHubRouter {
     ///
     /// Also persists any `webhook_secret` from `staticData` as a fallback
     /// (will not overwrite secrets already captured by the provider mock).
-    async fn refresh_triggers(&self) -> Result<(), crate::n8n::N8nClientError> {
+    ///
+    /// Called periodically by the background task, and also triggered
+    /// immediately when the provider mock intercepts a webhook registration
+    /// so that the trigger metadata is available for routing without waiting
+    /// for the next periodic sync.
+    pub async fn refresh_triggers(&self) -> Result<(), crate::n8n::N8nClientError> {
         info!("Refreshing GitHub trigger configurations from n8n");
         let new_triggers = self.n8n_client.fetch_github_triggers().await?;
 

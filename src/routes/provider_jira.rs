@@ -4,7 +4,7 @@ use axum::{
     response::{IntoResponse, Json},
 };
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::AppState;
 
@@ -37,7 +37,7 @@ pub async fn list_webhooks() -> impl IntoResponse {
 /// the registration successful. The `self` URL in the response is used by n8n
 /// to extract the webhook ID for DELETE operations during deactivation.
 pub async fn create_webhook(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let url = body.get("url").and_then(|v| v.as_str()).unwrap_or("");
@@ -52,6 +52,16 @@ pub async fn create_webhook(
         url = %url,
         "Jira mock: captured webhook registration"
     );
+
+    // Trigger an immediate sync so the jira_triggers table is populated
+    // right away — otherwise events arriving before the next periodic refresh
+    // would find no matching trigger rows.
+    let jira_router = state.jira_router.clone();
+    tokio::spawn(async move {
+        if let Err(e) = jira_router.refresh_triggers().await {
+            warn!(error = %e, "Jira mock: failed to refresh triggers after webhook registration");
+        }
+    });
 
     (
         StatusCode::CREATED,

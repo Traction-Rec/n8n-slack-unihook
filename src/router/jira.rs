@@ -56,8 +56,13 @@ impl JiraRouter {
         });
     }
 
-    /// Refresh the Jira trigger configurations from n8n and write to DB
-    async fn refresh_triggers(&self) -> Result<(), crate::n8n::N8nClientError> {
+    /// Refresh the Jira trigger configurations from n8n and write to DB.
+    ///
+    /// Called periodically by the background task, and also triggered
+    /// immediately when the provider mock intercepts a webhook registration
+    /// so that the trigger metadata is available for routing without waiting
+    /// for the next periodic sync.
+    pub async fn refresh_triggers(&self) -> Result<(), crate::n8n::N8nClientError> {
         info!("Refreshing Jira trigger configurations from n8n");
         let new_triggers = self.n8n_client.fetch_jira_triggers().await?;
 
