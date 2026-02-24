@@ -40,7 +40,7 @@ USER appuser
 # Default environment variables
 ENV LISTEN_ADDR=0.0.0.0:3000
 ENV REFRESH_INTERVAL_SECS=60
-ENV RUST_LOG=slack_unihook=info
+ENV RUST_LOG=n8n_unihook=info
 
 # Expose the default port
 EXPOSE 3000

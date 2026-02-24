@@ -17,7 +17,7 @@ services:
       # How often to refresh trigger configs from n8n (seconds)
       - REFRESH_INTERVAL_SECS=${REFRESH_INTERVAL_SECS:-60}
       # Log level
-      - RUST_LOG=${RUST_LOG:-slack_unihook=info}
+      - RUST_LOG=${RUST_LOG:-n8n_unihook=info}
     networks:
       - n8n-network
     healthcheck:

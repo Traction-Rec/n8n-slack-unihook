@@ -1,8 +1,8 @@
 [package]
 name = "n8n-unihook"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
-description = "A Slack event router for n8n that enables multiple workflows to share a single Slack app webhook"
+description = "A lightweight event router for n8n that enables multiple workflows to share a single inbound webhook for Slack, Jira, and GitHub"
 license = "MIT"
 
 [dependencies]

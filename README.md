@@ -72,7 +72,10 @@ N8N_API_KEY=your-n8n-api-key
 # Optional (defaults shown)
 N8N_API_URL=http://n8n:5678
 REFRESH_INTERVAL_SECS=60
-RUST_LOG=n8n_slack_unihook=info
+RUST_LOG=n8n_unihook=info
+
+# Path to the SQLite database used for webhook secrets & trigger metadata
+# DATABASE_PATH=unihook.db
 
 # Inbound webhook signature verification (optional but recommended for GitHub)
 # Set this to the shared secret configured in your GitHub webhook settings
@@ -120,7 +123,8 @@ cargo run
 | `N8N_ENDPOINT_WEBHOOK` | No | `webhook` | n8n production webhook path segment |
 | `N8N_ENDPOINT_WEBHOOK_TEST` | No | `webhook-test` | n8n test webhook path segment |
 | `GITHUB_WEBHOOK_SECRET` | No | - | Shared secret for verifying inbound GitHub webhooks (HMAC-SHA256 via `X-Hub-Signature-256`) |
-| `RUST_LOG` | No | `n8n_slack_unihook=info` | Log level |
+| `DATABASE_PATH` | No | `unihook.db` | Path to SQLite database for webhook secrets & trigger metadata (use `:memory:` for in-memory) |
+| `RUST_LOG` | No | `n8n_unihook=info` | Log level |
 
 ## Setting Up Slack
 
@@ -273,7 +277,7 @@ When a Jira webhook event arrives at `/jira/events`:
 >
 > Additionally, n8n's GitHub Trigger generates a random HMAC secret during webhook registration and verifies every incoming payload against it using the `X-Hub-Signature-256` header. **This verification cannot be disabled** — if the signature is missing or invalid, n8n returns `401 Unauthorized`.
 >
-> Since the user's GitHub webhook (pointing at Unihook) uses a different secret than the one n8n generated, the original signature from GitHub won't pass n8n's verification. Unihook solves this by **re-signing each forwarded payload** with n8n's per-workflow secret, which it reads from the workflow's `staticData` via the n8n API.
+> Since the user's GitHub webhook (pointing at Unihook) uses a different secret than the one n8n generated, the original signature from GitHub won't pass n8n's verification. Unihook solves this by **re-signing each forwarded payload** with n8n's per-workflow secret. When using the [credential workaround](#github-credential-workaround), the secret is captured at webhook registration time and stored in Unihook's SQLite database. Otherwise, it falls back to reading the secret from the workflow's `staticData` via the n8n API.
 >
 > See [ADR-001: GitHub Webhook Payload Re-signing](docs/adr/001-github-webhook-payload-re-signing.md) for the full technical rationale.
 >
@@ -334,7 +338,7 @@ Unihook discovers workflows with GitHub Trigger nodes via the n8n API. For each 
 - **Event types** — The list of GitHub event types the trigger listens for (e.g. `push`, `issues`, `*`)
 - **Owner** — The repository owner (e.g. `n8n-io`)
 - **Repository** — The repository name (e.g. `n8n`)
-- **Webhook secret** — The HMAC secret from n8n's `staticData` (used for re-signing)
+- **Webhook secret** — The HMAC secret used for re-signing (see [ADR-003](docs/adr/003-provider-api-interception-and-db-backed-triggers.md)). The primary source is Unihook's provider mock endpoint, which captures the secret at webhook registration time and stores it in SQLite. If the mock endpoint was not used (e.g. the workflow was activated before adopting the credential workaround), the secret is read from n8n's `staticData` as a fallback.
 
 When a GitHub webhook event arrives at `/github/events`:
 
@@ -393,12 +397,29 @@ No additional environment variables are required.
 
 ## API Endpoints
 
+### Event Ingestion (external services → n8n)
+
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/slack/events` | POST | Receives Slack events (configure in Slack app) |
 | `/jira/events` | POST | Receives Jira webhook events (configure in Jira) |
 | `/github/events` | POST | Receives GitHub webhook events (configure in GitHub) |
 | `/health` | GET | Health check — reports loaded trigger counts |
+
+### Provider API Mock (intercepting n8n → provider calls)
+
+These endpoints are served by Unihook so that n8n's trigger nodes can complete their webhook lifecycle without connecting to real external services. Point n8n credentials at Unihook's host to use them (see [Jira Credential Workaround](#jira-credential-workaround) and [GitHub Credential Workaround](#github-credential-workaround)).
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/user` | GET | GitHub credential validation — returns a mock user |
+| `/repos/{owner}/{repo}/hooks` | GET | GitHub webhook check — returns empty array |
+| `/repos/{owner}/{repo}/hooks` | POST | GitHub webhook creation — captures HMAC secret in SQLite |
+| `/repos/{owner}/{repo}/hooks/{id}` | DELETE | GitHub webhook deletion — removes secret from SQLite |
+| `/rest/api/2/myself` | GET | Jira credential validation — returns a mock user |
+| `/rest/webhooks/1.0/webhook` | GET | Jira webhook check — returns empty array |
+| `/rest/webhooks/1.0/webhook` | POST | Jira webhook creation — returns a valid webhook object |
+| `/rest/webhooks/1.0/webhook/{id}` | DELETE | Jira webhook deletion — returns 204 |
 
 ## Reverse Proxy Setup (nginx example)
 
@@ -491,8 +512,8 @@ The integration test environment uses Unihook's built-in provider API mock endpo
 ### GitHub events returning 401 from n8n
 
 - This means the payload re-signing failed or the webhook secret is stale
-- Ensure the workflow has been activated at least once (so `staticData` is populated with the webhook secret)
-- Trigger a refresh by restarting Unihook or waiting for the next refresh interval
+- If using the [credential workaround](#github-credential-workaround), secrets are captured automatically at webhook registration time — try deactivating and reactivating the workflow so n8n re-registers the webhook and Unihook captures the new secret
+- If **not** using the credential workaround, ensure the workflow has been activated at least once (so n8n's `staticData` is populated with the webhook secret) and wait for the next trigger refresh cycle
 - Check logs for `"No webhook secret available"` warnings
 
 ### n8n API connection issues

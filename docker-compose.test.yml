@@ -59,7 +59,7 @@ services:
       - N8N_API_URL=http://n8n:6789
       - LISTEN_ADDR=0.0.0.0:3000
       - REFRESH_INTERVAL_SECS=5
-      - RUST_LOG=n8n_slack_unihook=debug
+      - RUST_LOG=n8n_unihook=debug
       # Webhook secret for inbound GitHub signature verification
       - GITHUB_WEBHOOK_SECRET=test-github-webhook-secret-for-integration-tests
       # SQLite database for webhook secrets & trigger metadata
